@@ -1,0 +1,392 @@
+/* ============================================================
+   音智新媒 · 补充控件样式
+   （range 滑块 / 处方列表 / 少量排版微调）
+   遵循 styles.css 的 Organic token，不引入新色相
+   ============================================================ */
+
+/* ---------- Range slider ---------- */
+.range {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 22px;
+  background: transparent;
+  cursor: pointer;
+}
+.range::-webkit-slider-runnable-track {
+  height: 5px;
+  border-radius: 999px;
+  background: rgba(46,38,32,.14);
+}
+.range::-moz-range-track {
+  height: 5px;
+  border-radius: 999px;
+  background: rgba(46,38,32,.14);
+}
+.range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 19px; height: 19px;
+  margin-top: -7px;
+  border-radius: 50%;
+  background: var(--terracotta);
+  border: 2.5px solid var(--sand);
+  box-shadow: 0 2px 8px rgba(198,103,61,.42);
+  transition: transform .22s var(--ease), background .22s;
+}
+.range::-moz-range-thumb {
+  width: 19px; height: 19px;
+  border-radius: 50%;
+  background: var(--terracotta);
+  border: 2.5px solid var(--sand);
+  box-shadow: 0 2px 8px rgba(198,103,61,.42);
+}
+.range:hover::-webkit-slider-thumb { transform: scale(1.14); }
+.range:focus-visible { outline: none; }
+.range:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 4px rgba(198,103,61,.28); }
+/* Firefox 不认 ::-webkit-*，需给 ::-moz-range-thumb 配对同款焦点环 */
+.range:focus-visible::-moz-range-thumb { box-shadow: 0 0 0 4px rgba(198,103,61,.28); }
+
+/* ---------- 处方列表 ---------- */
+.prescription {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.prescription-item {
+  display: grid;
+  grid-template-columns: 30px 1fr;
+  gap: 14px;
+  align-items: start;
+  padding: 15px 2px;
+  border-top: 1px solid rgba(46,38,32,.1);
+  opacity: 0;
+  transform: translateY(8px);
+  transition: opacity .55s var(--ease), transform .55s var(--ease);
+}
+.prescription-item:first-child { border-top: none; }
+.prescription-item.is-in { opacity: 1; transform: none; }
+
+.prescription-step {
+  width: 26px; height: 26px;
+  border-radius: 50%;
+  display: grid; place-items: center;
+  font-family: var(--display);
+  font-size: .785rem;
+  background: rgba(198,103,61,.14);
+  color: var(--terracotta-deep);
+  line-height: 1;
+}
+.prescription-item b {
+  display: block;
+  font-family: var(--display);
+  font-size: .965rem;
+  font-weight: 500;
+  margin-bottom: 3px;
+  letter-spacing: -.005em;
+}
+.prescription-item p {
+  font-size: .865rem;
+  color: var(--ink-soft);
+  line-height: 1.66;
+}
+
+/* ---------- 英文副标题：禁止在连字符处断行 ---------- */
+.hero h1 .en .nb { white-space: nowrap; }
+
+/* ---------- 进度轨：短标签 + 正文避让 ---------- */
+.rail-label {
+  font-family: var(--body);
+  font-size: .745rem;
+  letter-spacing: .14em;
+  color: var(--ink-faint);
+  white-space: nowrap;
+}
+.rail-item.is-active .rail-label { color: var(--ink-soft); }
+.rail-item.is-done .rail-label { color: var(--moss); }
+
+/* 与 styles.css 的 @media (max-width: 900px) 轨变形严格互补：901px 起即避让侧轨 */
+@media (min-width: 901px) {
+  .hero { padding-left: calc(var(--gutter) + 96px); }
+  .section, .footer { padding-left: calc(var(--gutter) + 96px); }
+}
+
+/* ---------- 焦点可见性 ---------- */
+.btn:focus-visible,
+.chip:focus-visible,
+.rail-item:focus-visible,
+.dropzone:focus-visible {
+  outline: 2px solid var(--terracotta);
+  outline-offset: 3px;
+}
+
+/* ---------- 选中态的 chip（调式互转 / 波形切换） ---------- */
+.chip[role="radio"] {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  min-width: 58px;
+  padding: 9px 15px;
+}
+.chip[role="radio"] span {
+  font-family: var(--display);
+  font-size: 1.12rem;
+  line-height: 1.15;
+}
+.chip[role="radio"] small {
+  font-size: .685rem;
+  letter-spacing: .045em;
+  opacity: .72;
+}
+
+/* ---------- 结构图例 ---------- */
+#structureLegend .legend-swatch {
+  width: 11px; height: 11px;
+  border-radius: 3px;
+}
+
+/* ---------- 窄屏：章节导语独占一行，左对齐 ---------- */
+@media (max-width: 860px) {
+  .section-head .hint {
+    flex: 1 1 100%;
+    max-width: 48ch;
+    text-align: left;
+  }
+}
+
+/* ---------- 移动端：内容不被底部进度轨遮挡 ---------- */
+@media (max-width: 900px) {
+  .footer { padding-bottom: clamp(120px, 18vh, 170px); }
+  .hero h1 { font-size: clamp(2.45rem, 10vw, 3.8rem); max-width: 12ch; }
+  .rail-label { display: none; }
+  .hero-inner { max-width: 100%; }
+  /* 版本树竖排时连接符改为向下 */
+  .tree { flex-direction: column; }
+  .tree-node:not(:last-child)::after {
+    content: "↓";
+    right: 50%; top: auto; bottom: -23px;
+    transform: translateX(50%);
+    opacity: .45;
+  }
+  .tree-node { min-width: 0; width: 100%; }
+}
+
+/* ============================================================
+   第一梯队创新（2026-10-05）：证据链 / 盲听 / 结构重排 /
+   响度目标 / 互转试听 / 有据可查 AI
+   仍守 Organic token，不引入新色相
+   ============================================================ */
+
+/* ---------- 可点开证据的指标 ---------- */
+.metric-ev {
+  cursor: pointer;
+  border-radius: var(--r-md, 16px);
+  transition: box-shadow .3s var(--ease), transform .3s var(--ease);
+}
+.metric-ev:hover, .metric-ev:focus-visible {
+  box-shadow: 0 0 0 1.5px rgba(198,103,61,.5);
+  outline: none;
+  transform: translateY(-2px);
+}
+.metric-ev::after {
+  content: "证据 →";
+  display: block;
+  font-size: .68rem;
+  letter-spacing: .1em;
+  color: var(--terracotta);
+  opacity: 0;
+  transition: opacity .3s var(--ease);
+  margin-top: 6px;
+}
+.metric-ev:hover::after, .metric-ev:focus-visible::after { opacity: 1; }
+
+/* ---------- 证据链面板 ---------- */
+.ev-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) minmax(220px, 1fr);
+  gap: 22px;
+  align-items: start;
+  margin-top: 16px;
+}
+@media (max-width: 860px) { .ev-layout { grid-template-columns: 1fr; } }
+.ev-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  font-size: .845rem;
+  line-height: 1.6;
+}
+.ev-line {
+  padding: 9px 13px;
+  border-radius: 12px;
+  background: rgba(236,226,209,.72);
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+}
+.ev-line b { font-weight: 600; color: var(--ink); }
+.ev-line.is-ok { border-left: 3px solid var(--moss); }
+.ev-line.is-bad { border-left: 3px solid var(--terracotta); }
+.ev-line.is-neutral { border-left: 3px solid rgba(46,38,32,.25); }
+.ev-line .ev-path {
+  display: block;
+  font-size: .7rem;
+  letter-spacing: .06em;
+  color: var(--ink-faint);
+  margin-top: 2px;
+}
+#evTabs .chip { cursor: pointer; }
+
+/* ---------- 结构重排 ---------- */
+#structEdit { border-top: 1px dashed rgba(46,38,32,.18); padding-top: 4px; }
+#structPlan .chip {
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+}
+#structPlan .chip.is-sel {
+  background: var(--terracotta);
+  color: var(--sand);
+}
+#structPlan .chip.is-sel:hover { background: var(--terracotta-deep); }
+#structPlan .chip.is-dup { opacity: .78; }
+
+/* ---------- 盲听 A/B ---------- */
+#blindA, #blindB {
+  min-width: 64px;
+  font-family: var(--display);
+  font-size: 1rem;
+  padding: 10px 22px;
+}
+#blindA[aria-pressed="true"], #blindB[aria-pressed="true"] {
+  background: var(--ink);
+  color: var(--sand);
+}
+#blindA[aria-pressed="true"]:hover, #blindB[aria-pressed="true"]:hover {
+  background: var(--terracotta-deep);
+}
+.chip:disabled { opacity: .4; cursor: not-allowed; }
+
+/* ---------- 导出响度目标 ---------- */
+#lufsTargets .chip { cursor: pointer; font-variant-numeric: tabular-nums; }
+#lufsTargets .chip[aria-checked="true"] {
+  background: var(--ink);
+  color: var(--sand);
+}
+#lufsTargets .chip[aria-checked="true"]:hover { background: var(--terracotta-deep); }
+
+/* ---------- AI 问答 ---------- */
+.ai-log {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: 340px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+.ai-bubble {
+  padding: 13px 16px;
+  border-radius: 16px 16px 16px 6px;
+  background: rgba(236,226,209,.78);
+  color: var(--ink-soft);
+  font-size: .905rem;
+  line-height: 1.72;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.ai-bubble.is-user {
+  align-self: flex-end;
+  background: var(--ink);
+  color: var(--sand);
+  border-radius: 16px 16px 6px 16px;
+}
+.ai-bubble.is-error { border-left: 3px solid var(--terracotta); }
+.ai-bubble .ai-cites {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 10px;
+}
+.ai-cite {
+  font-size: .72rem;
+  letter-spacing: .03em;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: rgba(198,103,61,.15);
+  color: var(--terracotta-deep);
+  font-variant-numeric: tabular-nums;
+}
+.ai-dossier { margin-top: 14px; font-size: .84rem; }
+.ai-dossier summary {
+  cursor: pointer;
+  color: var(--ink-faint);
+  letter-spacing: .04em;
+  user-select: none;
+}
+.ai-dossier[open] summary { color: var(--ink-soft); margin-bottom: 8px; }
+.ai-dossier pre {
+  max-height: 240px;
+  overflow: auto;
+  padding: 13px 15px;
+  border-radius: 12px;
+  background: rgba(46,38,32,.055);
+  font-size: .76rem;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.ai-input {
+  flex: 1;
+  min-width: 0;
+  padding: 11px 16px;
+  border-radius: 999px;
+  border: 1.5px solid rgba(46,38,32,.2);
+  background: rgba(255,255,255,.55);
+  font-family: var(--body);
+  font-size: .905rem;
+  color: var(--ink);
+  transition: border-color .3s var(--ease);
+}
+.ai-input:focus { outline: none; border-color: var(--terracotta); }
+.ai-input:disabled { opacity: .55; }
+#aiCard .card-title { display: flex; align-items: center; gap: 12px; }
+
+/* ---------- 接口设置弹窗 ---------- */
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(46,38,32,.42);
+  backdrop-filter: blur(3px);
+}
+.modal[hidden] { display: none; }
+.modal-box {
+  width: min(460px, 100%);
+  padding: 26px 28px 24px;
+  border-radius: 22px;
+  background: var(--sand);
+  box-shadow: 0 24px 70px rgba(46,38,32,.3);
+}
+.ai-field {
+  display: grid;
+  grid-template-columns: 76px 1fr;
+  gap: 12px;
+  align-items: center;
+  margin-top: 14px;
+}
+.ai-field span {
+  font-size: .8rem;
+  letter-spacing: .08em;
+  color: var(--ink-soft);
+}
+.ai-field input {
+  padding: 10px 14px;
+  border-radius: 12px;
+  border: 1.5px solid rgba(46,38,32,.2);
+  background: rgba(255,255,255,.6);
+  font-family: var(--body);
+  font-size: .88rem;
+  color: var(--ink);
+}
+.ai-field input:focus { outline: none; border-color: var(--terracotta); }

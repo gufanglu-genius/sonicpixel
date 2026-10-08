@@ -1,0 +1,23 @@
+const { chromium } = require('playwright-core');
+(async () => {
+  const b = await chromium.launch({ args: ['--no-sandbox', '--autoplay-policy=no-user-gesture-required'] });
+  const p = await b.newPage({ viewport: { width: 1440, height: 900 } });
+  await p.goto('http://127.0.0.1:8080/', { waitUntil: 'networkidle' });
+  await p.click('#btnDemo');
+  await p.waitForFunction(() => !document.querySelector('#checkBody').hidden, { timeout: 60000 });
+  await p.waitForTimeout(800);
+  await p.evaluate(() => { document.documentElement.style.scrollBehavior='auto'; document.getElementById('sec-check').scrollIntoView({block:'start'}); });
+  await p.waitForTimeout(500);
+  await p.screenshot({ path: 'z-final-check.png' });
+  await p.click('#btnProcess');
+  await p.waitForFunction(() => document.querySelector('#btnProcess').textContent.includes('重新精修'), { timeout: 60000 });
+  await p.click('#btnRender');
+  await p.waitForFunction(() => document.querySelector('#btnRender').textContent.includes('重新渲染'), { timeout: 60000 });
+  await p.click('#btnRecheck');
+  await p.waitForTimeout(1400);
+  await p.evaluate(() => document.getElementById('sec-deliver').scrollIntoView({block:'start'}));
+  await p.waitForTimeout(500);
+  await p.screenshot({ path: 'z-final-deliver.png' });
+  console.log('shots ok');
+  await b.close();
+})();

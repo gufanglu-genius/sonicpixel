@@ -1,0 +1,8 @@
+# 测试运行时产物（可再生，不入库）
+out/
+out.zip
+*.wav
+*.mid
+*.zip
+*.png
+*.json

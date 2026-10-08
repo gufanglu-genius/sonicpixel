@@ -1,0 +1,20 @@
+const { chromium } = require('/Users/chenhuidediannao/.stepfun/node_modules/playwright-core');
+const EXEC='/Users/chenhuidediannao/Library/Caches/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-mac-arm64/chrome-headless-shell';
+(async()=>{
+  const b=await chromium.launch({executablePath:EXEC,args:['--no-sandbox']});
+  const p=await b.newPage({viewport:{width:1440,height:1000}});
+  p.on('pageerror',e=>console.log('PAGEERROR:',e.message));
+  await p.goto('http://127.0.0.1:8080/?fresh=1&synth=1',{waitUntil:'networkidle'});
+  await p.click('#btnDemo');
+  await p.waitForFunction(()=>document.querySelector('#mBpm')?.textContent.trim()!=='—',null,{timeout:180000});
+  await p.waitForFunction(()=>document.querySelector('#refineBody')&&!document.querySelector('#refineBody').hasAttribute('hidden'),null,{timeout:60000});
+  const card=p.locator('#sourceKind').locator('xpath=ancestor::div[contains(@class,"card")][1]');
+  await card.scrollIntoViewIfNeeded();
+  await p.waitForTimeout(800);
+  await card.screenshot({path:'/tmp/sonic-shots/midi/card-ai.png'});
+  await p.click('#sourceKind .chip:has-text("真实录音")');
+  await p.waitForTimeout(800);
+  await card.screenshot({path:'/tmp/sonic-shots/midi/card-acoustic.png'});
+  console.log('ok');
+  await b.close();
+})().catch(e=>{console.error(e.message);process.exit(1)});
