@@ -210,12 +210,12 @@ const EXEC = '/Users/chenhuidediannao/Library/Caches/ms-playwright/chromium_head
     ok(await p.isVisible('#aiModal'), '设置弹窗打开', 'visible');
     await p.fill('#aiBaseUrl', 'https://api.xiaomimimo.com/v1');
     await p.fill('#aiKey', 'sk-test-innovations');
-    await p.fill('#aiModel', 'mimo-v2.5-pro');
+    await p.fill('#aiModel', 'mimo-v2.6-flash');
 
     await p.route('**/v1/models', (route) => route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({ data: [{ id: 'mimo-v2.5-pro' }, { id: 'mimo-v2-flash' }] }),
+      body: JSON.stringify({ data: [{ id: 'mimo-v2.6-flash' }, { id: 'mimo-v2-flash' }] }),
     }));
     await p.click('#btnAiTest');
     await p.waitForFunction(() =>

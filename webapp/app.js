@@ -2377,12 +2377,15 @@
   const AI_DEFAULTS = {
     baseUrl: 'https://api.xiaomimimo.com/v1',
     apiKey: '',
-    model: 'mimo-v2.5-pro',
+    model: 'mimo-v2.6-flash',
   };
   let aiCfg = (() => {
     try {
       const raw = JSON.parse(localStorage.getItem(AI_LS) || 'null');
-      return raw ? { ...AI_DEFAULTS, ...raw } : { ...AI_DEFAULTS };
+      const cfg = raw ? { ...AI_DEFAULTS, ...raw } : { ...AI_DEFAULTS };
+      // mimo-v2.5 系列即将下架：本机已存的旧模型名自动迁移到 2.6 flash
+      if (/^mimo-v2\.5/.test(cfg.model)) cfg.model = AI_DEFAULTS.model;
+      return cfg;
     } catch (_) { return { ...AI_DEFAULTS }; }
   })();
   let aiMsgs = [];   // {role:'user'|'assistant', text} —— 只装成功往返
