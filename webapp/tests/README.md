@@ -10,7 +10,7 @@
 | `guard-mode-structure.js` | **调式结构护栏**（纯 Node，无浏览器）。五声五调式 fixture 必须全绿；gong-harmonic 是**刻意保留的已知红**（G4/1176Hz 谐波落 chroma 带，宫被读成徵），不许为了让它变绿改引擎 |
 | `probe-innovations.js` | **第一梯队创新·引擎侧探针**（纯 Node，秒级）：证据链字段 / BS.1770 响度已知值 / 响度对齐+峰值截断 / 五调式互转恒等·集合闭合·偏音直通 |
 | `midi/` | `unit.js` 纯字节单测（SMF/ZIP 解析，Node 直跑）；`e2e.js` 浏览器端到端（分治/导出/恢复）；`probe-*.js` 拍号/相位/力度诊断探针 |
-| `product/` | `verify-*.js` 产品验收：export / persist / realsong / demo / all / fixes / tonality / eq-preserve / **score**（原曲五线谱：卡片/buildScore 口径/画布非空/PNG 导出/MusicXML 结构与时值配平/卡片收起展开/页签仍是 5）/ **loudcurve**（响度走势：3 秒短时窗曲线/目标线/导出对齐后靠拢/只加不删）/ **innovations**（证据链·响度合规·盲听·结构重排·五调式试听·有据 AI，mock MiMo 接口）；`probe-refine-strength.js` 精修改动量量化（等响分带差，只测不判） |
+| `product/` | `verify-*.js` 产品验收：export / persist / realsong / demo / all / fixes / tonality / eq-preserve / **score**（原曲五线谱：卡片/buildScore 口径/画布非空/PNG 导出/MusicXML 结构与时值配平/卡片收起展开/页签仍是 5）/ **loudcurve**（响度走势：3 秒短时窗曲线/目标线/导出对齐后靠拢/只加不删）/ **innovations**（证据链·响度合规·盲听·结构重排·五调式试听·有据 AI，mock MiMo 接口）/ **bwe**（高频重建前置级：体检判词·重建证据三数字·启用后精修吃重建音频·关开关回原曲·存盘只带参数刷新恢复·全带素材无入口·纯音覆盖 0，素材用产品 `web/assets` 的 trumpet/fullband/sine440）/ **bwe-demo**（一键体验：hero 与导入区两入口·自动体检判可重建·自动重建约 97.4%·自动启用开关·自动精修·状态语与证据卡脉冲落点，素材 `webapp/assets/bwe-demo-trumpet.wav`）；`probe-refine-strength.js` 精修改动量量化（等响分带差，只测不判） |
 | `shots/` | 早期截图与回归脚本（smoke/qa/regress/rt* 等），多为历史快照用途 |
 
 ## 运行前提
@@ -37,6 +37,9 @@ node tests/product/verify-eq-preserve.js  # 手动 EQ 不被切换吃掉
 node tests/product/verify-fixes.js        # 速度接线 / 拍号出处诚实 / 回流
 node tests/product/verify-score.js        # 原曲五线谱（卡片/buildScore/画布/PNG/MusicXML/收起展开/页签 5 个）
 node tests/product/verify-loudcurve.js    # 响度走势（短时曲线/目标线/导出对齐靠拢/只加不删）
+node tests/product/verify-bwe.js          # 高频重建前置级（判词/重建/开关/刷新恢复/全带/纯音，需 8080）
+node tests/product/verify-bwe-demo.js     # 一键体验高频重建全链（两入口/自动体检重建启用精修/落点，需 8080）
+node tests/shots/smoke.js                 # 截图冒烟（MIDI/档案导出下载，需 8080 与 /tmp/sonic-shots）
 node tests/product/verify-realsong.js     # 真歌全链（最长，含导出+恢复）
 node tests/midi/e2e.js                    # 分治 + MIDI/分轨导出 + 恢复
 ```

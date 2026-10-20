@@ -78,6 +78,7 @@
     <div class="hero-actions">
       <button class="btn btn-primary" id="btnHeroStart">开始体检</button>
       <button class="btn btn-ghost" id="btnHeroDemo">用真歌示例试跑</button>
+      <button class="btn btn-ghost" id="btnHeroBweDemo">30 秒体验高频重建</button>
       <span class="status" id="heroStatus" aria-live="polite">
         <span class="status-dot"></span>
         <span id="heroStatusText">等待导入</span>
@@ -128,6 +129,7 @@
     <div class="dropzone-actions">
       <button class="btn btn-primary" id="btnPick" type="button">选择文件</button>
       <button class="btn btn-ghost" id="btnDemo" type="button">试跑真歌示例</button>
+      <button class="btn btn-ghost" id="btnBweDemo" type="button">30 秒体验高频重建</button>
       <button class="btn btn-ghost" id="btnClearWs" type="button" hidden>清空工作区</button>
     </div>
     <div class="dropzone-meta" id="dropStatus" aria-live="polite">尚未导入音频</div>
@@ -233,6 +235,18 @@
             <div class="metric-label">整体响度</div>
             <div class="metric-value is-empty" id="mLufs">—</div>
             <div class="metric-sub">BS.1770 K 加权 · 门限后积分</div>
+          </div>
+        </div>
+
+        <div class="card reveal" id="hbCard">
+          <div class="card-title">高频段完整性</div>
+          <div class="row" style="margin-bottom:10px">
+            <span class="tag" id="hbVerdict">检测中</span>
+            <span class="tag" id="hbRatioTag" hidden></span>
+          </div>
+          <p class="hint" id="hbNote" style="margin:0">正在检测 8 kHz 以上是否还有内容…</p>
+          <div class="row" style="margin-top:14px">
+            <button class="btn btn-primary btn-sm" id="btnBweGo" hidden>去精修页重建高频</button>
           </div>
         </div>
 
@@ -362,6 +376,41 @@
             <span class="tag">导出响度目标</span>
             <div class="chips" id="lufsTargets" role="radiogroup" aria-label="导出响度目标"></div>
             <span class="tag" id="lufsState">未测量</span>
+          </div>
+        </div>
+
+        <div class="card reveal" id="bweCard">
+          <div class="card-title">
+            高频重建 · 前置级
+            <span class="tag" id="bweStateTag" style="margin-left:auto">待检测</span>
+          </div>
+          <p class="hint" id="bweHint" style="margin:0 0 16px">带限老录音在 8 kHz 以上是空的。这一级在进 L2 之前把可证实的谐波高频补回去；证据不足的帧保持原样，不硬补。检测结果出来前不可启用。</p>
+          <div class="row">
+            <button class="chip" id="bweToggle" aria-pressed="false" disabled>启用</button>
+            <button class="btn btn-primary btn-sm" id="btnBweRun" disabled>重建高频</button>
+            <button class="btn btn-ghost btn-sm" id="btnBweCancel" hidden>取消</button>
+            <span class="tag">重建强度 <span id="bweAlphaTag">100%</span></span>
+          </div>
+          <div class="spacer-sm"></div>
+          <input class="range" type="range" id="bweAlpha" min="20" max="100" value="100" aria-label="重建强度" />
+          <div class="bwe-progress" id="bweProgress" hidden><i id="bweProgressBar"></i></div>
+          <p class="hint" id="bweDetail" style="margin:12px 0 0"></p>
+          <div class="metric-grid" id="bweEvidence" hidden style="margin-top:16px">
+            <div class="metric">
+              <div class="metric-label">可重建比例</div>
+              <div class="metric-value is-empty" id="bweCov">—</div>
+              <div class="metric-sub">通过证据门的帧占比</div>
+            </div>
+            <div class="metric">
+              <div class="metric-label">建议放弃比例</div>
+              <div class="metric-value is-empty" id="bweAbstain">—</div>
+              <div class="metric-sub">证据不足、保持原样的帧</div>
+            </div>
+            <div class="metric">
+              <div class="metric-label">带内保持</div>
+              <div class="metric-value is-empty" id="bweLeak">—</div>
+              <div class="metric-sub">带内能量泄漏，越低越好</div>
+            </div>
           </div>
         </div>
 
@@ -598,12 +647,17 @@
         <option value="mimo-v2.6-pro"></option>
         <option value="mimo-v2.6"></option>
         <option value="mimo-v2-flash"></option>
+        <option value="qwen-plus"></option>
+        <option value="qwen-flash"></option>
+        <option value="qwen3-vl-plus"></option>
       </datalist>
     </label>
     <p class="hint" style="margin:2px 0 0">
-      Key 只存在本机浏览器 localStorage，请求由浏览器直连官方接口（小米 MiMo 平台
+      Key 只存在本机浏览器 localStorage，请求由浏览器直连 OpenAI 兼容接口（小米 MiMo
       <a href="https://platform.xiaomimimo.com/" target="_blank" rel="noopener">platform.xiaomimimo.com</a>
-      获取），不经过任何第三方。未配置时问答不可用。
+      或阿里云百炼
+      <a href="https://dashscope.console.aliyun.com/" target="_blank" rel="noopener">dashscope.console.aliyun.com</a>
+      均可），不经过任何第三方。未配置时问答不可用。
     </p>
     <div class="row" style="margin-top:16px">
       <button class="btn btn-primary btn-sm" id="btnAiSave">保存</button>
@@ -614,8 +668,8 @@
   </div>
 </div>
 
-<script src="engine.js?v=20261007"></script>
-<script src="store.js?v=20261007"></script>
-<script src="app.js?v=20261007"></script>
+<script src="engine.js?v=20261020"></script>
+<script src="store.js?v=20261020"></script>
+<script src="app.js?v=20261020"></script>
 </body>
 </html>

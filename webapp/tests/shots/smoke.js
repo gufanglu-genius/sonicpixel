@@ -1,15 +1,17 @@
-const { chromium } = require('playwright-core');
+const { chromium } = require('/Users/chenhuidediannao/.stepfun/node_modules/playwright-core');
+const EXEC = '/Users/chenhuidediannao/Library/Caches/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-mac-arm64/chrome-headless-shell';
 (async () => {
-  const browser = await chromium.launch({ args: ['--no-sandbox', '--autoplay-policy=no-user-gesture-required'] });
+  const browser = await chromium.launch({ executablePath: EXEC, args: ['--no-sandbox', '--autoplay-policy=no-user-gesture-required'] });
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, acceptDownloads: true });
   const errs = [];
   page.on('pageerror', e => errs.push('PE: ' + e.message));
   page.on('console', m => { if (m.type() === 'error') errs.push('CE: ' + m.text()); });
   await page.goto('http://127.0.0.1:8080/', { waitUntil: 'networkidle' });
   await page.click('#btnDemo');
-  await page.waitForFunction(() => !document.querySelector('#checkBody').hidden, { timeout: 30000 });
+  // waitForFunction 第二参是透传给页面函数的 arg，options 必须放第三参（老写法 timeout 被当 arg 吞掉）
+  await page.waitForFunction(() => !document.querySelector('#checkBody').hidden, null, { timeout: 30000 });
   await page.click('#btnRender');
-  await page.waitForFunction(() => document.querySelector('#btnRender').textContent.includes('重新渲染') || document.querySelector('#btnRender').textContent.includes('失败'), { timeout: 30000 });
+  await page.waitForFunction(() => document.querySelector('#btnRender').textContent.includes('重新渲染') || document.querySelector('#btnRender').textContent.includes('失败'), null, { timeout: 30000 });
   // 导出 MIDI
   const [dl] = await Promise.all([
     page.waitForEvent('download', { timeout: 15000 }),

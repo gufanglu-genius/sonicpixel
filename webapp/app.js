@@ -9,6 +9,68 @@
   const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
   const E = window.SonicEngine;
 
+  /* ---------- 分析 Worker ----------
+     E.analyze / E.measureLoudness 是纯 JS 同步重活（同尺寸素材实测
+     分别卡主线程 1.3s / 0.25s），搬进 engineWorker.js 跑。引擎只读，
+     这里只是换线程；Worker 挂了就退回主线程同步跑，不会比以前差。 */
+  let engWorker = null;
+  let engSeq = 0;
+  const engPending = new Map();
+
+  function engFailAll(msg) {
+    const err = new Error(msg);
+    for (const p of engPending.values()) p.reject(err);
+    engPending.clear();
+    engWorker = null;
+  }
+
+  function engGetWorker() {
+    if (engWorker) return engWorker;
+    const w = new Worker('engineWorker.js');
+    w.onmessage = (ev) => {
+      const { id, ok, value, error } = ev.data || {};
+      const p = engPending.get(id);
+      if (!p) return;
+      engPending.delete(id);
+      if (ok) p.resolve(value);
+      else p.reject(new Error(error || 'engine worker error'));
+    };
+    w.onerror = () => engFailAll('engine worker 加载或运行失败');
+    w.onmessageerror = () => engFailAll('engine worker 消息无法序列化');
+    engWorker = w;
+    return w;
+  }
+
+  function engCall(cmd, buffer) {
+    return new Promise((resolve, reject) => {
+      const id = ++engSeq;
+      engPending.set(id, { resolve, reject });
+      const n = Math.max(1, Math.min(2, buffer.numberOfChannels || 1));
+      const chans = [];
+      for (let c = 0; c < n; c++) {
+        // getChannelData 是 AudioBuffer 内部存储的视图，拷一份再传，
+        // 拷贝的 buffer 走 transfer 递过去，不重复结构化克隆
+        chans.push(new Float32Array(buffer.getChannelData(c)));
+      }
+      engGetWorker().postMessage(
+        { cmd, id, channels: chans, sampleRate: buffer.sampleRate, length: buffer.length },
+        chans.map((a) => a.buffer)
+      );
+    });
+  }
+
+  function engCallOrSync(cmd, buffer) {
+    return engCall(cmd, buffer).catch((err) => {
+      console.error(err);
+      if (cmd === 'analyze') return { profile: E.analyze(buffer) };
+      if (cmd === 'loudness') return { lufs: E.measureLoudness(buffer) };
+      return { profile: E.analyze(buffer), lufs: E.measureLoudness(buffer) };
+    });
+  }
+  const analyzeAsync = async (b) => (await engCallOrSync('analyze', b)).profile;
+  const loudnessAsync = async (b) => (await engCallOrSync('loudness', b)).lufs;
+  const checkupAsync = (b) => engCallOrSync('checkup', b);
+
   /* ---------- 状态 ---------- */
   const state = {
     originBuffer: null,
@@ -50,6 +112,19 @@
     lufs: null,            // {orig, proc} BS.1770 门限后积分实测
     lufsTarget: 'off',     // 导出响度目标（平台合规）
     loudCurve: null,       // {orig, proc} 短时响度曲线（E.loudnessCurve 快照；proc 在导出带目标时为对齐版）
+
+    /* 高频重建前置级（TCS-BWE，见 bwe/ 目录）：
+       buffer 是从 originBuffer 派生的会话采样率 AudioBuffer，不入存盘；
+       detect 是体检后的守卫检测，diag 是最近一次重建的证据。 */
+    bwe: {
+      on: false,           // 用户开关：执行精修时把 E.process 的输入换成 buffer
+      alpha: 1,            // 重建强度 0..1（y_mix = x + α·(y−x)，带内恒等）
+      detect: null,        // {guardRatio, pass, threshold, durationS}
+      diag: null,          // {coverage, abstainFrac, leakDb, confMean, ...}
+      buffer: null,        // AudioBuffer（派生 PCM，仅会话内存）
+      rawMid: null,        // 重建后的中置分量（Float64Array，滑杆重混用）
+      busy: false,
+    },
   };
 
   /* 测试钩子：probe-l2 / probe-arrangement 等探针直接读运行时状态。
@@ -2009,8 +2084,8 @@
     if (tag) tag.textContent = '测量响度…';
     if (btn) btn.disabled = true;
     try {
-      const luO = E.measureLoudness(state.originBuffer);
-      const luP = E.measureLoudness(state.processedBuffer);
+      const luO = await loudnessAsync(state.originBuffer);
+      const luP = await loudnessAsync(state.processedBuffer);
       if (luO.lufs == null || luP.lufs == null) {
         if (tag) tag.textContent = '响度测不出，无法等响盲听';
         if (btn) btn.disabled = false;
@@ -2372,13 +2447,16 @@
     if (btn) btn.disabled = false;
   }
 
-  /* ---------- ⑥ 有据可查的 AI（小米 MiMo · OpenAI 兼容接口） ---------- */
+  /* ---------- ⑥ 有据可查的 AI（OpenAI 兼容接口：小米 MiMo / 阿里千问等） ---------- */
   const AI_LS = 'sonic.ai.cfg.v1';
   const AI_DEFAULTS = {
     baseUrl: 'https://api.xiaomimimo.com/v1',
     apiKey: '',
     model: 'mimo-v2.6-flash',
   };
+  // 本机私有配置（config.local.js，已 gitignore）：预填 Key，用户免手输。
+  // 只在 localStorage 没有存过 Key 时生效：用户在设置里填的 Key 永远优先。
+  // 文件不存在时 fetch 404 无害（不进控制台 error）。
   let aiCfg = (() => {
     try {
       const raw = JSON.parse(localStorage.getItem(AI_LS) || 'null');
@@ -2388,6 +2466,21 @@
       return cfg;
     } catch (_) { return { ...AI_DEFAULTS }; }
   })();
+  fetch('config.local.js', { cache: 'no-store' })
+    .then((r) => (r.ok ? r.text() : null))
+    .then((t) => {
+      if (!t) return;
+      const m = t.match(/SONICPIXEL_LOCAL\s*=\s*(\{[\s\S]*?\});/);
+      if (!m) return;
+      try {
+        const cfg = JSON.parse(m[1]);
+        if (cfg && cfg.ai && cfg.ai.apiKey && !aiCfg.apiKey) {
+          aiCfg = { ...aiCfg, ...cfg.ai };
+          aiSyncUI();
+        }
+      } catch (_) { /* 语法不对就当没有 */ }
+    })
+    .catch(() => { /* 未部署 config.local.js 时静默 */ });
   let aiMsgs = [];   // {role:'user'|'assistant', text} —— 只装成功往返
   let aiBusy = false;
 
@@ -2416,7 +2509,7 @@
     if (intro) {
       intro.textContent = ready
         ? '只引用本页 L1–L4 实测数据回答；涉及本曲的数值必须带字段出处，数据里没有的就直说没有。'
-        : '未配置接口 Key：点右上角「接口设置」填入小米 MiMo 的 API Key 后可用。';
+        : '未配置接口 Key：点右上角「接口设置」填入 OpenAI 兼容接口（小米 MiMo / 阿里千问等）的 API Key 后可用。';
     }
   }
 
@@ -2470,7 +2563,19 @@
       精修: state.profileProcessed ? {
         残余比: residualRatio(state.profileProcessed.quality),
         lra_db: state.profileProcessed.quality.lra,
+        高频重建前置: state.bwe.on && state.bwe.buffer ? '已启用' : '未启用',
       } : '尚未精修',
+      高频重建: state.bwe.detect ? {
+        允许重建: state.bwe.detect.pass,
+        '8k以上能量占比': state.bwe.detect.guardRatio,
+        当前启用: state.bwe.on,
+        强度: state.bwe.alpha,
+        产物: state.bwe.buffer ? '已生成' : '未生成',
+        可重建比例: state.bwe.diag ? state.bwe.diag.coverage : null,
+        建议放弃比例: state.bwe.diag ? state.bwe.diag.abstainFrac : null,
+        带内泄漏_db: state.bwe.diag ? state.bwe.diag.leakDb : null,
+        平均置信: state.bwe.diag ? state.bwe.diag.confMean : null,
+      } : '未检测',
       结构编辑: state.structHistory.length
         ? `已应用 ${state.structHistory.length} 次` : '无',
       导出响度目标: lufsTargetOf().label,
@@ -2676,6 +2781,369 @@
       if (tag) tag.textContent = n != null ? `连接正常 · ${n} 个模型` : '连接正常';
     } catch (err) {
       if (tag) tag.textContent = '失败：' + (err && err.message ? err.message : String(err));
+    }
+  }
+
+  /* ============================================================
+     高频重建前置级（TCS-BWE · bwe/ 目录，Worker 内跑）
+     ------------------------------------------------------------
+     体检后异步做守卫检测；精修前可选重建。重建产物是
+     originBuffer 的派生 PCM（state.bwe.buffer），不入存盘；
+     执行精修时把 E.process 的输入换成它。取消 = terminate Worker。
+     ============================================================ */
+  let bweWorker = null;
+  let bwePending = null;   // {kind:'detect'|'run', gen, resolve}
+
+  function bweGetWorker() {
+    if (bweWorker) return bweWorker;
+    const w = new Worker('bwe/worker.js', { type: 'module' });
+    w.onmessage = (ev) => {
+      const m = ev.data;
+      if (!bwePending) return;
+      if (m.type === 'analyzed' && bwePending.kind === 'detect') {
+        const p = bwePending;
+        bwePending = null;
+        if (p.gen === state.loadGen) {
+          state.bwe.detect = {
+            guardRatio: m.guardRatio,
+            pass: m.pass,
+            threshold: m.threshold,
+            durationS: m.durationS,
+          };
+          renderHbCard();
+          syncBweUi();
+          buildAiDossier();
+        }
+        p.resolve(false);
+        return;
+      }
+      if (m.type === 'progress' && bwePending.kind === 'run') {
+        const bar = $('#bweProgressBar');
+        if (bar) bar.style.width = m.p + '%';
+        const d = $('#bweDetail');
+        if (d) d.textContent =
+          `重建中 ${m.p.toFixed(1)}%（帧级证据自检，修不了的部分自动放弃）`;
+        return;
+      }
+      if (m.type === 'done' && bwePending.kind === 'run') {
+        const p = bwePending;
+        bwePending = null;
+        if (p.gen !== state.loadGen) { p.resolve(false); return; }
+        const src = state.originBuffer;
+        const n = src.length;
+        const mid0 = bweMidOf(src);
+        const yMid = m.y;                       // 会话采样率重建后中置分量
+        state.bwe.rawMid = yMid;
+        state.bwe.buffer = bweAssembleBuffer(mid0, yMid, state.bwe.alpha);
+        state.bwe.diag = m.diag;
+        state.bwe.busy = false;
+        const doneBar = $('#bweProgressBar');
+        if (doneBar) doneBar.style.width = '100%';
+        renderBweEvidence();
+        syncBweUi();
+        buildAiDossier();
+        addVersionNode('高频重建',
+          `可重建 ${(m.diag.coverage * 100).toFixed(1)}% · ` +
+          `带内泄漏 ${m.diag.leakDb.toFixed(1)} dB`);
+        scheduleSave();
+        p.resolve(true);
+        return;
+      }
+      if (m.type === 'error') {
+        const p = bwePending;
+        bwePending = null;
+        state.bwe.busy = false;
+        syncBweUi();
+        const d = $('#bweDetail');
+        if (d) d.textContent = '重建出错：' + m.message;
+        if (p) p.resolve(false);
+        return;
+      }
+    };
+    w.onerror = (e) => {
+      const p = bwePending;
+      bwePending = null;
+      state.bwe.busy = false;
+      syncBweUi();
+      const d = $('#bweDetail');
+      if (d) d.textContent = '重建出错：' + (e && e.message ? e.message : String(e));
+      if (p) p.resolve(false);
+    };
+    bweWorker = w;
+    return w;
+  }
+
+  function bweKillWorker() {
+    if (bweWorker) { bweWorker.terminate(); bweWorker = null; }
+    const p = bwePending;
+    bwePending = null;
+    if (p) p.resolve(false);
+  }
+
+  function bweMidOf(buffer) {
+    const n = buffer.length;
+    const mid = new Float64Array(n);
+    if (buffer.numberOfChannels >= 2) {
+      const L = buffer.getChannelData(0);
+      const R = buffer.getChannelData(1);
+      for (let i = 0; i < n; i++) mid[i] = (L[i] + R[i]) / 2;
+    } else {
+      mid.set(buffer.getChannelData(0));
+    }
+    return mid;
+  }
+
+  // y_mix = x + α·(y−x)。带内 y≈x（残差高通保证），α 只影响新写的高频；
+  // 立体声 M'S 合成：L = M' + S，R = M' − S，S 用重建前的差分。
+  function bweAssembleBuffer(mid0, yMid, alpha) {
+    const src = state.originBuffer;
+    const n = src.length;
+    const out = getCtx().createBuffer(
+      Math.min(src.numberOfChannels, 2), n, src.sampleRate);
+    const oL = out.getChannelData(0);
+    if (src.numberOfChannels >= 2) {
+      const iL = src.getChannelData(0);
+      const iR = src.getChannelData(1);
+      const oR = out.getChannelData(1);
+      for (let i = 0; i < n; i++) {
+        const m = mid0[i] + alpha * (yMid[i] - mid0[i]);
+        const s = (iL[i] - iR[i]) / 2;
+        oL[i] = m + s;
+        oR[i] = m - s;
+      }
+    } else {
+      for (let i = 0; i < n; i++) {
+        oL[i] = mid0[i] + alpha * (yMid[i] - mid0[i]);
+      }
+    }
+    return out;
+  }
+
+  // 体检后异步检测：不阻塞体检完成，gen 过期直接丢
+  function bweDetect() {
+    syncBweUi();
+    if (!state.originBuffer) return;
+    const gen = state.loadGen;
+    const payload = bweMidOf(state.originBuffer);
+    bwePending = { kind: 'detect', gen, resolve: () => {} };
+    bweGetWorker().postMessage({
+      cmd: 'analyze',
+      channelData: payload,
+      srSession: state.originBuffer.sampleRate,
+      nSamples: state.originBuffer.length,
+      tag: 'detect',
+    }, [payload.buffer]);
+  }
+
+  function bweRun() {
+    if (state.bwe.busy) return Promise.resolve(false);
+    if (!state.originBuffer || !state.bwe.detect || !state.bwe.detect.pass) {
+      return Promise.resolve(false);
+    }
+    state.bwe.busy = true;
+    syncBweUi();
+    const bar = $('#bweProgressBar');
+    if (bar) bar.style.width = '0%';
+    const progWrap = $('#bweProgress');
+    if (progWrap) progWrap.hidden = false;
+    const d = $('#bweDetail');
+    if (d) d.textContent = '准备中…';
+    const gen = state.loadGen;
+    const payload = bweMidOf(state.originBuffer);
+    return new Promise((resolve) => {
+      bwePending = { kind: 'run', gen, resolve };
+      bweGetWorker().postMessage({
+        cmd: 'restore',
+        channelData: payload,
+        srSession: state.originBuffer.sampleRate,
+        nSamples: state.originBuffer.length,
+        tag: 'run',
+      }, [payload.buffer]);
+    });
+  }
+
+  function bweReset() {
+    bweKillWorker();
+    state.bwe = {
+      on: false, alpha: 1, detect: null, diag: null,
+      buffer: null, rawMid: null, busy: false,
+    };
+    const ev = $('#bweEvidence');
+    if (ev) ev.hidden = true;
+    const prog = $('#bweProgress');
+    if (prog) prog.hidden = true;
+    const bar = $('#bweProgressBar');
+    if (bar) bar.style.width = '0%';
+    const d = $('#bweDetail');
+    if (d) d.textContent = '';
+    const al = $('#bweAlpha');
+    if (al) al.value = '100';
+    const at = $('#bweAlphaTag');
+    if (at) at.textContent = '100%';
+    renderHbCard();
+    syncBweUi();
+  }
+
+  function renderHbCard() {
+    const v = $('#hbVerdict');
+    const tag = $('#hbRatioTag');
+    const note = $('#hbNote');
+    if (!v || !tag || !note) return;
+    const d = state.bwe.detect;
+    if (!d) {
+      v.className = 'tag';
+      v.textContent = '检测中';
+      tag.hidden = true;
+      note.textContent = '正在检测 8 kHz 以上是否还有内容…';
+      return;
+    }
+    if (d.pass) {
+      v.className = 'tag tag-accent';
+      v.textContent = '可尝试高频重建';
+      tag.hidden = false;
+      tag.textContent = '高频能量占比 ' + d.guardRatio.toExponential(1);
+      note.textContent = '整段 8 kHz 以上几乎没有内容（阈值 ' +
+        d.threshold + '），属于典型带限素材。可在精修页开启「高频重建」补回可证实的高频；' +
+        '证据不足的帧会保持原样。';
+    } else {
+      v.className = 'tag';
+      v.textContent = '高频内容完整';
+      tag.hidden = false;
+      tag.textContent = '高频能量占比 ' + d.guardRatio.toExponential(1);
+      note.textContent = '8 kHz 以上仍有内容（阈值 ' + d.threshold +
+        '），不是带限素材，重建没有意义，精修页不提供入口。';
+    }
+  }
+
+  function renderBweEvidence() {
+    const wrap = $('#bweEvidence');
+    if (!wrap) return;
+    const g = state.bwe.diag;
+    if (!g) { wrap.hidden = true; return; }
+    wrap.hidden = false;
+    const set = (id, text, unit) => {
+      const el = $(id);
+      if (!el) return;
+      el.innerHTML = text + (unit ? `<span class="unit">${unit}</span>` : '');
+      el.classList.remove('is-empty');
+    };
+    set('#bweCov', (g.coverage * 100).toFixed(1), '%');
+    set('#bweAbstain', (g.abstainFrac * 100).toFixed(1), '%');
+    set('#bweLeak', g.leakDb.toFixed(1), 'dB');
+    const detail = $('#bweDetail');
+    if (detail) {
+      let t = `共 ${g.nFrames} 帧，写入 ${g.nWrite} 帧，平均置信度 ${g.confMean.toFixed(2)}。` +
+        '建议放弃的帧保持原样，不硬补。强度滑杆只做混合，不改变这些证据数字。';
+      if (g.signalPassthrough) {
+        t = '整段直通：素材本身已含高频，算法原样返回，一个样本都没有改。';
+      } else if (g.coverage === 0) {
+        t = '全部帧都未通过证据门：这段素材谐波证据不足，硬补只会造出假高音。建议放弃。';
+      }
+      detail.textContent = t;
+    }
+  }
+
+  function syncBweUi() {
+    const toggle = $('#bweToggle');
+    const btnRun = $('#btnBweRun');
+    const btnCancel = $('#btnBweCancel');
+    const st = $('#bweStateTag');
+    const hint = $('#bweHint');
+    const d = state.bwe.detect;
+    if (!toggle || !btnRun || !st) return;
+    const pass = !!(d && d.pass);
+    toggle.disabled = !pass || state.bwe.busy;
+    toggle.setAttribute('aria-pressed', String(state.bwe.on));
+    toggle.classList.toggle('is-active', state.bwe.on);
+    btnRun.disabled = !pass || state.bwe.busy;
+    btnRun.textContent = state.bwe.buffer ? '重新重建' : '重建高频';
+    const go = $('#btnBweGo');
+    if (go) {
+      go.hidden = !pass;
+      if (pass) go.textContent = state.bwe.buffer ? '查看高频重建证据' : '去精修页重建高频';
+    }
+    // 能力显眼化：判可重建时两张卡上赤陶强调，配合体检卡直达按钮
+    const hbEl = $('#hbCard');
+    if (hbEl) hbEl.classList.toggle('bwe-hl', pass);
+    const bcEl = $('#bweCard');
+    if (bcEl) bcEl.classList.toggle('bwe-hl', pass);
+    if (btnCancel) btnCancel.hidden = !state.bwe.busy;
+    const prog = $('#bweProgress');
+    if (prog) prog.hidden = !state.bwe.busy && !state.bwe.buffer;
+    if (state.bwe.busy) {
+      st.textContent = '重建中…';
+    } else if (state.bwe.buffer) {
+      st.textContent = state.bwe.on ? '已重建 · 已启用' : '已重建 · 未启用';
+    } else if (state.bwe.diag && pass) {
+      st.textContent = '待重建';
+      if (hint) {
+        hint.textContent = '重建参数与证据已恢复，产物不入存盘。点「重建高频」，或直接执行精修（会自动先重建一次）。';
+      }
+    } else if (d && d.pass) {
+      st.textContent = '可重建';
+      if (hint) {
+        hint.textContent = '带限老录音在 8 kHz 以上是空的。这一级在进 L2 之前把可证实的谐波高频补回去；证据不足的帧保持原样，不硬补。';
+      }
+    } else if (d) {
+      st.textContent = '不适用';
+      if (hint) {
+        hint.textContent = '本素材高频内容完整，重建无意义，入口已关闭。';
+      }
+    } else {
+      st.textContent = '待检测';
+    }
+  }
+
+  function bweWireUi() {
+    const toggle = $('#bweToggle');
+    if (toggle) {
+      toggle.addEventListener('click', () => {
+        if (toggle.disabled) return;
+        state.bwe.on = !state.bwe.on;
+        syncBweUi();
+        scheduleSave();
+      });
+    }
+    const btnRun = $('#btnBweRun');
+    if (btnRun) btnRun.addEventListener('click', () => { bweRun(); });
+    const btnCancel = $('#btnBweCancel');
+    if (btnCancel) {
+      btnCancel.addEventListener('click', () => {
+        bweKillWorker();
+        state.bwe.busy = false;
+        const prog = $('#bweProgress');
+        if (prog) prog.hidden = !state.bwe.buffer;
+        const d = $('#bweDetail');
+        if (d) d.textContent = '已取消';
+        syncBweUi();
+      });
+    }
+    const btnGo = $('#btnBweGo');
+    if (btnGo) {
+      btnGo.addEventListener('click', () => {
+        const card = $('#bweCard');
+        if (!card) return;
+        card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        card.classList.remove('bwe-pulse');
+        void card.offsetWidth;  // 强制重排以重启动画
+        card.classList.add('bwe-pulse');
+        setTimeout(() => card.classList.remove('bwe-pulse'), 2600);
+      });
+    }
+    const alpha = $('#bweAlpha');
+    if (alpha) {
+      alpha.addEventListener('input', () => {
+        const a = Number(alpha.value) / 100;
+        state.bwe.alpha = a;
+        const t = $('#bweAlphaTag');
+        if (t) t.textContent = alpha.value + '%';
+        // 已有产物就地重混，不必重跑 Worker
+        if (state.bwe.rawMid && state.originBuffer) {
+          state.bwe.buffer = bweAssembleBuffer(
+            bweMidOf(state.originBuffer), state.bwe.rawMid, a);
+        }
+        scheduleSave();
+      });
     }
   }
 
@@ -3330,6 +3798,9 @@
     state.arrangement = null;
     state.showingAfter = false;
     state.eqParams = null;
+    // 高频重建产物是旧素材的派生 PCM，随素材作废；参数回默认
+    // （恢复工作区时 restoreWorkspace 会把存盘的开关/强度/证据写回）
+    bweReset();
     state.muted = {};
     resetVersionTree();
     resetDerivedUI();
@@ -3343,12 +3814,23 @@
       renderAiLog();
     }
 
-    const profile = (cached && cached.meta ? cached : E.analyze(buffer));
+    // 体检 + 响度一次进 Worker（同尺寸 analyze 实测卡主线程 1.3s），
+    // 等结果期间用户换了素材，这份体检作废
+    let profile, luOrig;
+    if (cached && cached.meta) {
+      profile = cached;
+      luOrig = await loudnessAsync(buffer);
+    } else {
+      const r = await checkupAsync(buffer);
+      profile = r.profile;
+      luOrig = r.lufs;
+    }
+    if (gen !== state.loadGen) return;
     profile.meta.source_file = label;
     state.originBuffer = buffer;
     state.profile = profile;
     // 整曲响度实测（BS.1770）：L1 指标与证据链共用这一次测量
-    state.lufs = { orig: E.measureLoudness(buffer), proc: null };
+    state.lufs = { orig: luOrig, proc: null };
     // 走带挂上新素材，试听立刻可用（不必先精修）
     T.buffer = buffer;
     T.offset = 0;
@@ -3371,6 +3853,8 @@
     buildStructPlan();
     buildLufsTargets();
     buildAiDossier();
+    // 高频段完整性：异步守卫检测，结果回来渲染体检卡 + 精修入口
+    bweDetect();
 
     const tonalTag = profile.identity.tonalityName
       ? ` · ${profile.identity.westernKey || profile.identity.tonalityName}` : '';
@@ -3415,9 +3899,18 @@
     btn.disabled = true;
     btn.textContent = '处理中…';
     const strength = Number($('#strength').value) / 100;
+    const gen = state.loadGen;   // 期间换了素材就放弃这次精修
 
     try {
-      const out = await E.process(state.originBuffer, {
+      // 高频重建开着但产物还没生成（恢复工作区 / 刚打开开关）：
+      // 先跑重建再进 L2，执行精修永远兑现开关；取消或失败则回落原曲
+      if (state.bwe.on && !state.bwe.buffer) {
+        const ran = await bweRun();
+        if (!ran) { state.bwe.on = false; syncBweUi(); }
+      }
+      if (gen !== state.loadGen) return;
+      const bweSrc = state.bwe.on && state.bwe.buffer;
+      const out = await E.process(bweSrc ? state.bwe.buffer : state.originBuffer, {
         highpass: 30,
         eq: state.eqParams,
         exciter: 0.3,
@@ -3430,10 +3923,22 @@
         notches: state.notches,
         expand: expandOf(state.profile && state.profile.quality),
       });
-      state.processedBuffer = out;
+      if (gen !== state.loadGen) return;   // E.process 期间换了素材：产物作废
       const cachedP = cache && cache.profileProcessed && cache.profileProcessed.meta
         ? cache.profileProcessed : null;
-      state.profileProcessed = cachedP || E.analyze(out);
+      // 精修后体检 + 响度同样进 Worker；等结果期间换素材照样作废
+      let procProfile, luProc;
+      if (cachedP) {
+        procProfile = cachedP;
+        luProc = await loudnessAsync(out);
+      } else {
+        const r = await checkupAsync(out);
+        procProfile = r.profile;
+        luProc = r.lufs;
+      }
+      if (gen !== state.loadGen) return;
+      state.processedBuffer = out;
+      state.profileProcessed = procProfile;
       state.profileProcessed.meta.source_file = state.profile?.meta?.source_file || null;
 
       // 指标是「谐波外残余能量比」不是 THD；未测出显示 '—'，不编数字
@@ -3446,7 +3951,7 @@
       setWaveView(true, metricNote);
 
       addVersionNode('精修',
-        `三级处理链 · 强度 ${Math.round(strength * 100)}% · ` +
+        `三级处理链${bweSrc ? ' · 高频重建前置' : ''} · 强度 ${Math.round(strength * 100)}% · ` +
         `残余 ${resid != null ? (resid * 100).toFixed(1) + '%' : '—'}`);
 
       $('#btnAB').disabled = false;
@@ -3456,7 +3961,7 @@
       // 重新实测精修后响度供证据链与导出对齐用
       stopBlind();
       state.lufs = state.lufs || { orig: null, proc: null };
-      state.lufs.proc = E.measureLoudness(out);
+      state.lufs.proc = luProc;
       updateLufsState();
       updateLoudCurve('proc');   // 响度走势：叠上精修后曲线
       buildAiDossier();
@@ -3560,7 +4065,7 @@
       drawPiano($('#chartPiano'), res.events);
       const cachedA = cache && cache.profileArrangement && cache.profileArrangement.meta
         ? cache.profileArrangement : null;
-      state.profileArrangement = cachedA || E.analyze(res.buffer);
+      state.profileArrangement = cachedA || await analyzeAsync(res.buffer);
       // 再生乐段是派生产物，不能冒充原曲身份：保留自身 bpm/duration，用 derived_from 标注来源
       state.profileArrangement.meta.derived_from = state.profile?.meta?.source_file || null;
       state.profileArrangement.meta.artifact = 'arrangement';
@@ -3866,6 +4371,8 @@
       checks: $$('.check').map((c) => c.className).join('|'),
       struct: state.structHistory.length,
       lufsT: state.lufsTarget,
+      bwe: [state.bwe.on, state.bwe.alpha,
+        state.bwe.diag ? state.bwe.diag.coverage : null].join('|'),
     });
   }
 
@@ -3921,6 +4428,14 @@
           plan.map((p) => ({ s: p.s, e: p.e, l: p.l }))),
         fileLabel: state.fileLabel,
         lufsTarget: state.lufsTarget,
+        // 高频重建只存参数与证据，派生 PCM（bwe.buffer/rawMid）不入库，
+        // 恢复时按需重跑（执行精修会自动先重建）
+        bwe: {
+          on: state.bwe.on,
+          alpha: state.bwe.alpha,
+          detect: state.bwe.detect,
+          diag: state.bwe.diag,
+        },
       });
       // 指纹必须记下：不记的话每次触发都整条重写，
       // 拖一下滑块就是一次几十 KB 的落库，纯浪费
@@ -3928,6 +4443,7 @@
       else if (r.reason === 'too-large') markSaveSkipped(r.bytes);
     } catch (err) {
       console.info('[store] 存盘失败', err);
+      markSaveFailed(err);
     }
   }
 
@@ -3948,6 +4464,17 @@
     el.textContent =
       `源文件 ${(bytes / 1048576).toFixed(0)} MB，超过 ` +
       `${(Store.MAX_BYTES / 1048576).toFixed(0)} MB 上限，本次不存盘`;
+  }
+
+  // 配额写爆时以前只 console.info，用户看不出来刷新会丢工作区
+  function markSaveFailed(err) {
+    const el = $('#saveStatus');
+    if (!el) return;
+    const quota = !!err && (err.name === 'QuotaExceededError' || err.code === 22);
+    el.hidden = false;
+    el.textContent = quota
+      ? '存盘失败：浏览器存储空间已满，刷新后无法恢复，可清理本站点数据再继续'
+      : '存盘失败：本次改动刷新后可能不被恢复';
   }
 
   async function restoreWorkspace() {
@@ -4027,6 +4554,22 @@
       if (rec.material && rec.material !== state.material) state.material = rec.material;
       buildSourceKind();
       buildPrescription(state.profile);
+
+      // 高频重建：参数与证据随存盘恢复；产物 PCM 未存，
+      // 开着开关的话执行精修时会自动重跑一次重建
+      if (rec.bwe) {
+        state.bwe.on = !!rec.bwe.on;
+        if (rec.bwe.alpha != null) state.bwe.alpha = rec.bwe.alpha;
+        if (rec.bwe.detect) state.bwe.detect = rec.bwe.detect;
+        if (rec.bwe.diag) state.bwe.diag = rec.bwe.diag;
+        const al = $('#bweAlpha');
+        if (al) al.value = String(Math.round(state.bwe.alpha * 100));
+        const at = $('#bweAlphaTag');
+        if (at) at.textContent = Math.round(state.bwe.alpha * 100) + '%';
+        renderHbCard();
+        renderBweEvidence();
+        syncBweUi();
+      }
 
       // 参数先归位，再重放下游动作——精修 / 渲染 / 回流都从 DOM 和 state 读参数
       if (rec.strength != null) {
@@ -4196,6 +4739,61 @@
     $('#btnDemo').addEventListener('click', runDemo);
     $('#btnHeroDemo').addEventListener('click', runDemo);
 
+    /* 一键体验高频重建：内置带限小号，自动跑体检 → 重建 → 启用 → 精修，
+       落点是精修页证据卡。素材 3 秒、检测与重建都是秒级，三十秒内看完 */
+    const runBweDemo = async () => {
+      const gen = ++state.loadGen;
+      setStatus('正在载入高频重建演示素材…', true);
+      try {
+        const res = await fetch('assets/bwe-demo-trumpet.wav');
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const bytes = await res.arrayBuffer();
+        if (gen !== state.loadGen) return;
+        const buf = await getCtx().decodeAudioData(bytes.slice(0));
+        if (gen !== state.loadGen) return;
+        state._srcBytes = bytes;
+        state._srcSize = bytes.byteLength;
+        state._srcKind = 'file';
+        await runPipeline(buf, '演示 · 带限小号.wav', gen);
+        if (gen !== state.loadGen) return;
+        // bweDetect 是异步守卫，等判词出来
+        while (state.bwe.detect === null && gen === state.loadGen) {
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        if (gen !== state.loadGen) return;
+        if (!state.bwe.detect || !state.bwe.detect.pass) {
+          setStatus('演示素材检测未通过，可导入自己的音频重试。', false);
+          return;
+        }
+        setStatus('检测到高频缺失，正在重建并精修…', true);
+        const ran = await bweRun();
+        if (!ran || gen !== state.loadGen) return;
+        const tg = $('#bweToggle');
+        if (tg && !state.bwe.on) tg.click();
+        await processAudio();
+        if (gen !== state.loadGen) return;
+        if (!state.processedBuffer) {
+          setStatus('精修未完成，可手动点「执行精修」重试。', false);
+          return;
+        }
+        setStatus('演示完成 · 高频重建已启用并完成精修，可 A/B 盲听或导出', false);
+        const card = $('#bweCard');
+        if (card) {
+          card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          card.classList.remove('bwe-pulse');
+          void card.offsetWidth;
+          card.classList.add('bwe-pulse');
+          setTimeout(() => card.classList.remove('bwe-pulse'), 2600);
+        }
+      } catch (err) {
+        console.error(err);
+        setStatus('演示素材加载失败，可导入自己的音频重试。', false);
+      }
+    };
+    $('#btnBweDemo').addEventListener('click', runBweDemo);
+    const heroBweDemo = $('#btnHeroBweDemo');
+    if (heroBweDemo) heroBweDemo.addEventListener('click', runBweDemo);
+
     // L2
     // 包一层箭头函数：processAudio/renderArrangement 的首参是恢复用的 cache，
     // 直接当监听器会把 MouseEvent 传进去
@@ -4203,6 +4801,7 @@
     $('#strength').addEventListener('input', (e) => {
       $('#strengthTag').textContent = '强度 ' + e.target.value + '%';
     });
+    bweWireUi();   // 高频重建前置级：开关 / 运行 / 取消 / 强度
 
     /* ---- 走带：试听 / 播放 / 暂停 ---- */
     $('#btnListen')?.addEventListener('click', togglePlay);
