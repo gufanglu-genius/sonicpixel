@@ -1,7 +1,12 @@
 const { chromium } = require('/Users/chenhuidediannao/.stepfun/node_modules/playwright-core');
 const EXEC = '/Users/chenhuidediannao/Library/Caches/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-mac-arm64/chrome-headless-shell';
-const FILE = '/Users/chenhuidediannao/Desktop/红头绳.wav';
 const path = require('path'); const fs = require('fs');
+// 红头绳.wav 已不在本机：可传 argv[2] 指定替代素材；缺素材是环境性跳过，不是回归
+const FILE = process.argv[2] || '/Users/chenhuidediannao/Desktop/红头绳.wav';
+if (!fs.existsSync(FILE)) {
+  console.log(`SKIPPED（环境性）: 素材缺失 ${FILE} · 传 argv[2] 指定替代 WAV`);
+  process.exit(0);
+}
 const OUT = '/tmp/sonic-shots/product/out';
 fs.mkdirSync(OUT, { recursive: true });
 

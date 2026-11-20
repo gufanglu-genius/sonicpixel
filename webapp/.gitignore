@@ -1,1 +1,3 @@
 config.local.js
+# FluidR3 抽取产物（DO NOT REDISTRIBUTE，须本地用 tools/extract_sf2.py 生成）
+assets/timbre/

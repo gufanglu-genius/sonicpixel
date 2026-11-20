@@ -13,11 +13,15 @@
   <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..700;1,9..144,300..700&family=Epilogue:wght@300;400;500;600&family=Noto+Serif+SC:wght@300;400;500;600&family=Noto+Sans+SC:wght@300;400;500&display=swap" rel="stylesheet" />
 </noscript>
 <link rel="stylesheet" href="styles.css?v=20261007" />
-<link rel="stylesheet" href="extra.css?v=20261007" />
+<link rel="stylesheet" href="extra.css?v=20261120" />
 </head>
 <body>
 
 <div class="grain" aria-hidden="true"></div>
+
+<!-- 右上角直达完整编曲项目（初团第一支AI乐队，本机 8231），新窗口打开不打断当前工作台 -->
+<a class="ext-band" href="http://127.0.0.1:8231/" target="_blank" rel="noopener"
+   title="新窗口打开初团第一支AI乐队完整编曲项目">AI乐队完整版 ↗</a>
 
 <!-- ============ 宫商角徵羽 · 进度轨 ============ -->
 <nav class="rail" id="rail" aria-label="流程导航">
@@ -550,6 +554,19 @@
           <span class="legend-item"><i class="legend-swatch" style="background:#8B9D83"></i>氛围</span>
         </div>
       </div>
+      <!-- 对话指挥：口语指令 → 千问/离线翻译成 ops → 只动点名的轨 -->
+      <div class="band-chat" id="bandChat">
+        <div class="ai-log" id="bandChatLog" aria-live="polite"></div>
+        <div class="row" style="margin-top:12px">
+          <input class="ai-input" id="bandChatInput" type="text"
+                 placeholder="先渲染乐段，再对乐队说话：和声换琶音、鼓密一点、换笛子别的不动…"
+                 aria-label="对乐队下指令" />
+          <button class="btn btn-primary btn-sm" id="btnBandChat" disabled>指挥</button>
+        </div>
+        <p class="hint" id="bandChatState" style="margin:8px 0 0">
+          渲染乐段后可用 · 优先走「接口设置」里的大模型（千问等），没有 Key 时回落离线规则。
+        </p>
+      </div>
     </div>
   </div>
 </section>
@@ -668,8 +685,13 @@
   </div>
 </div>
 
-<script src="engine.js?v=20261020"></script>
+<script src="engine.js?v=20261119"></script>
 <script src="store.js?v=20261020"></script>
-<script src="app.js?v=20261020"></script>
+<!-- AI乐队编配内核（原样引入；engine.js 在前，band.js 依赖 SonicEngine） -->
+<script src="sampler.js?v=20261119"></script>
+<script src="band.js?v=20261121"></script>
+<script src="parse.js?v=20261120"></script>
+<script src="llm.js?v=20261120"></script>
+<script src="app.js?v=20261120"></script>
 </body>
 </html>

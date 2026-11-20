@@ -2127,10 +2127,13 @@ function melodyGenome(data, sampleRate, chroma) {
    * ratio 下限是 1 —— 只能往下压，做不了往上的扩展。AI 生成的曲子普遍
    * 被 loudness 目标压扁（LRA 小、瞬态被抹平），要往回张就只能自己算。
    *
-   * 做法：先取 10ms 时间常数的能量包络 env，以它的**中位数**为参考 ref，
+   * 做法：先取 10ms 时间常数的**感知**包络 env，以它的中位数为参考 ref，
    * 再按 g = (env/ref)^(k-1) 施加增益 —— k>1 时包络高的地方增益大，
    * 响的更响、轻的更轻，crest factor 就回来了。
-   * 两个必须守住的点：
+   * 三个必须守住的点：
+   *   · 包络先过 BS.1770 K 加权（与本产品响度测量同一套口径）再平方。
+   *     裸能量包络被低频统治：重底鼓的曲子包络跟着鼓点起伏，扩展增益
+   *     被低频泵着走，听感是随拍抽气；K 加权后跟的是感知响度。
    *   · 参考取中位数而不是均值：个别瞬态不会把 ref 拉走，
    *     增益才在 1 上下摆，不会整段被抬高或压低。
    *   · 增益本身要再平滑一次（涨快落慢）：逐样本跳变的增益
@@ -2149,13 +2152,53 @@ function melodyGenome(data, sampleRate, chroma) {
     const chans = [];
     for (let c = 0; c < nCh; c++) chans.push(buffer.getChannelData(c));
 
-    // 1) 能量包络：单极点平滑，10ms 时间常数
+    // 1) 感知包络：单声道和 → BS.1770 K 加权（+4dB 高架 @1.68kHz +
+    //    38Hz 高通，RBJ 系数与 measureLoudness 同一组标定值）→ 平方 →
+    //    单极点平滑 10ms。低频不再统治包络，扩展跟着感知响度走。
+    const mono = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      let s = 0;
+      for (let c = 0; c < nCh; c++) s += chans[c][i];
+      mono[i] = s / nCh;
+    }
+    const kShelf = (() => {
+      const f0 = 1681.9748408, G = 3.999843, Q = 0.70717524;
+      const A = Math.pow(10, G / 40);
+      const w0 = (2 * Math.PI * f0) / sr;
+      const alpha = Math.sin(w0) / (2 * Q);
+      const cosw = Math.cos(w0);
+      const sqA = Math.sqrt(A);
+      const b0 = A * ((A + 1) + (A - 1) * cosw + 2 * sqA * alpha);
+      const b1 = -2 * A * ((A - 1) + (A + 1) * cosw);
+      const b2 = A * ((A + 1) + (A - 1) * cosw - 2 * sqA * alpha);
+      const a0 = (A + 1) - (A - 1) * cosw + 2 * sqA * alpha;
+      const a1 = 2 * ((A - 1) - (A + 1) * cosw);
+      const a2 = (A + 1) - (A - 1) * cosw - 2 * sqA * alpha;
+      return { b0: b0 / a0, b1: b1 / a0, b2: b2 / a0, a1: a1 / a0, a2: a2 / a0 };
+    })();
+    const kHp = (() => {
+      const f0 = 38.13547087, Q = 0.50032704;
+      const w0 = (2 * Math.PI * f0) / sr;
+      const alpha = Math.sin(w0) / (2 * Q);
+      const cosw = Math.cos(w0);
+      const b0 = (1 + cosw) / 2, b1 = -(1 + cosw), b2 = (1 + cosw) / 2;
+      const a0 = 1 + alpha, a1 = -2 * cosw, a2 = 1 - alpha;
+      return { b0: b0 / a0, b1: b1 / a0, b2: b2 / a0, a1: a1 / a0, a2: a2 / a0 };
+    })();
+    for (const c of [kShelf, kHp]) {
+      let x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+      for (let i = 0; i < n; i++) {
+        const xn = mono[i];
+        const yn = c.b0 * xn + c.b1 * x1 + c.b2 * x2 - c.a1 * y1 - c.a2 * y2;
+        x2 = x1; x1 = xn; y2 = y1; y1 = yn;
+        mono[i] = yn;
+      }
+    }
     const aEnv = Math.exp(-1 / (0.010 * sr));
     const env = new Float32Array(n);
     let e = 0;
     for (let i = 0; i < n; i++) {
-      let s = 0;
-      for (let c = 0; c < nCh; c++) { const v = chans[c][i]; s += v * v; }
+      const s = mono[i] * mono[i];
       e = s + aEnv * (e - s);
       env[i] = Math.sqrt(e);
     }
@@ -2403,16 +2446,38 @@ function melodyGenome(data, sampleRate, chroma) {
       upExpand(rendered, 1 + clamp(expand, 0, 1) * i01 * (1.2 + 0.6 * i01));
     }
 
-    // 峰值归一到 -0.3 dBFS：**双向**，升也降。
+    // 真峰值归一到 -0.3 dBTP：**双向**，升也降。
     // 旧代码 `if (g < 1)` 只衰减不提升，安静素材精修完还是安静，
-    // 与「峰值归一到 -0.3 dBFS」的文案不符（归一 = 对齐到目标峰值，不是限幅）。
+    // 与「峰值归一」的文案不符（归一 = 对齐到目标峰值，不是限幅）。
+    // 只按样点峰归一也不够：样点峰 -0.3 dBFS 的文件经 DAC/有损编码
+    // 重建后，样间峰会越出 0 dBFS。所以对每个样点局部极大做抛物线
+    // 插值估样间峰，按「样点峰与估计样间峰的较大者」归一。
+    // 抛物线法是标准的低成本样间峰估计，对带限信号略偏保守（估值
+    // 通常低于 4 倍过采样的真值），但恒 ≥ 样点峰，方向上只安全不冒进。
     let p = 0;
     for (let c = 0; c < rendered.numberOfChannels; c++) {
       const ch = rendered.getChannelData(c);
       for (let i = 0; i < ch.length; i++) p = Math.max(p, Math.abs(ch[i]));
     }
-    if (p > 1e-9) {
-      const g = 0.966 / p; // -0.3 dBFS
+    let tp = p;
+    for (let c = 0; c < rendered.numberOfChannels; c++) {
+      const ch = rendered.getChannelData(c);
+      const last = ch.length - 1;
+      for (let i = 1; i < last; i++) {
+        const b = Math.abs(ch[i]);
+        const a = Math.abs(ch[i - 1]);
+        if (b < a) continue;
+        const cc = Math.abs(ch[i + 1]);
+        if (b < cc) continue;
+        const den = a - 2 * b + cc;
+        if (den >= 0) continue; // 非上凸：顶点朝下或平坦，不会更高
+        const t = 0.5 * (a - cc) / den; // 顶点偏移，|t| ≤ 0.5
+        const v = b - 0.25 * (a - cc) * t;
+        if (v > tp) tp = v;
+      }
+    }
+    if (tp > 1e-9) {
+      const g = 0.966 / tp; // -0.3 dBTP
       for (let c = 0; c < rendered.numberOfChannels; c++) {
         const ch = rendered.getChannelData(c);
         for (let i = 0; i < ch.length; i++) ch[i] *= g;

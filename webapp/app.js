@@ -90,6 +90,12 @@
     muted: {},      // 轨道静音态（持久，不依赖 DOM class）
     loadGen: 0,     // 素材代数：过期的异步分析/渲染直接丢弃
     renderBusy: false,
+    /* 乐队编配（AI乐队内核接入，band.js）：bandModel 是当前乐段的编曲模型，
+       对话指挥在它上面打补丁后原地重渲；换素材即清。engine 字段区分回退路径。 */
+    bandModel: null,
+    bandTrackLevel: {},   // 对话 trackLevel 累积的每轨增益（0..1，缺省 1）
+    bandChatRecent: [],   // 最近指令，垫进大模型的上下文
+    bandChatBusy: false,
     /* 源素材的原始字节 + 出身：存盘时按它去重写入，派生 PCM 一律不存。
        只有导入的文件和合成的示例会有值，见 store.js 的注释。 */
     _srcBytes: null,
@@ -2511,6 +2517,19 @@
         ? '只引用本页 L1–L4 实测数据回答；涉及本曲的数值必须带字段出处，数据里没有的就直说没有。'
         : '未配置接口 Key：点右上角「接口设置」填入 OpenAI 兼容接口（小米 MiMo / 阿里千问等）的 API Key 后可用。';
     }
+    // 对话指挥（llm.js）与问答共用同一份接口配置：本机 config.local.js
+    // 预填的是千问 DashScope，改 Key/模型后指挥层同步跟随。
+    if (window.BandLLM) {
+      window.BAND_CONFIG = Object.assign({}, window.BAND_CONFIG, {
+        llmApiKey: ready ? aiCfg.apiKey : '',
+        llmEndpoint: aiCfg.baseUrl.replace(/\/+$/, '') + '/chat/completions',
+        llmModel: aiCfg.model,
+      });
+      // 乐队对话 UI 的同步函数由接入层提供；接入还没落地时必须守卫：
+      // 这段在 resetDerivedUI→aiSyncUI 的体检链上，抛错会让整条流水线
+      // 直接「示例合成失败」。
+      if (typeof syncBandChatUi === 'function') syncBandChatUi();
+    }
   }
 
   function buildAiDossier() {
@@ -3222,6 +3241,40 @@
     const q = profile.quality;
     const lines = [];
 
+    /* 频谱形状自校正（母带级微调，不整容）：
+       把 10 个 EQ 频段的实测平均功率（L1 quality.spectrum，2048 点，
+       binHz = sampleRate/4096）与本曲自身的 3 点平滑趋势相比，只修
+       「明显偏离自身趋势」的宽频凹陷/隆起。不向任何参考曲线靠拢：
+       线性倾斜会被趋势本身吸收，明暗交给 centroid 规则，这里只管
+       缺陷性的鼓包与塌陷。死区 1.5 dB、修正取偏离的一半、单段封顶
+       3 dB；边上的 31Hz 与 16k 是搁架段，趋势在边上不可定义，不参与。 */
+    const spec = q.spectrum;
+    const srHz = profile.meta && profile.meta.sampleRate;
+    const specCorr = new Array(10).fill(0); // 每段修正量，dB
+    const specDev = new Array(10).fill(0);  // 每段相对自身趋势的偏离，dB
+    if (spec && spec.length > 1 && srHz > 0) {
+      const binHz = srHz / (spec.length * 2);
+      const bandFreqs = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
+      const bandL = [];
+      for (let i = 0; i < 10; i++) {
+        const lo = i === 0 ? 20 : bandFreqs[i] / Math.SQRT2;
+        const hi = i === 9 ? Math.min(srHz / 2, bandFreqs[9] * Math.SQRT2)
+          : bandFreqs[i] * Math.SQRT2;
+        let e = 0;
+        const b0 = Math.max(1, Math.ceil(lo / binHz));
+        const b1 = Math.min(spec.length - 1, Math.floor(hi / binHz));
+        for (let b = b0; b <= b1; b++) e += spec[b];
+        bandL.push(10 * Math.log10(e + 1e-30));
+      }
+      for (let i = 1; i <= 8; i++) {
+        const dev = bandL[i] - (bandL[i - 1] + bandL[i] + bandL[i + 1]) / 3;
+        specDev[i] = dev;
+        if (Math.abs(dev) > 1.5) {
+          specCorr[i] = Math.max(-3, Math.min(3, -0.5 * dev));
+        }
+      }
+    }
+
     if (q.subRatio > 0.02 || q.lowRatio > 0.28) {
       lines.push(['前置滤波',
         `切除 30Hz 以下超低频。当前低频能量占比 ${(q.lowRatio * 100).toFixed(0)}%，` +
@@ -3262,6 +3315,34 @@
     } else {
       lines.push(['动态均衡',
         '低频干净：150–400Hz 能量压在泛音列上，未检出工频哼声。均衡段按当前曲线维持。']);
+    }
+
+    /* 处方 EQ 在这里一次算完：形状校正垫底，诊断规则覆盖（哼声最后压，
+       低频抬升会把它盖掉，陷波必须赢）。文案也从这份结果里读，保证
+       说的和做的永远是同一组数。 */
+    const preEq = specCorr.map((db) => Math.max(-1, Math.min(1, db / 12)));
+    if (smear != null && smear > 0.25) { preEq[3] = -0.45; preEq[4] = -0.3; }
+    if (q.lowRatio > 0.2 && hum <= 0.2) { preEq[1] = 0.32; preEq[2] = 0.18; }
+    if (hum > 0.2) { preEq[0] = -0.55; preEq[1] = -0.35; }
+    // 频谱重心在 profile.timbre.centroid（quality 里没有 centroid 字段）；
+    // cent > 0 守卫：无有效频谱帧时 centroid 为 0，不能误判成「过暗」去抬 4k/8k
+    const cent = profile.timbre && profile.timbre.centroid;
+    if (cent > 3200) preEq[8] = -0.15;
+    if (cent > 0 && cent < 1400) { preEq[7] = 0.22; preEq[8] = 0.18; }
+
+    // 频谱形状校正的实测句：只在真有修正、且没被诊断规则盖掉时追加到
+    // 第二条（动态均衡）里，处方条数保持四条不增不减。
+    const acted = specCorr
+      .map((v, i) => ({ i, v, d: specDev[i] }))
+      .filter((x) => x.v !== 0 && Math.abs(preEq[x.i] * 12 - x.v) < 0.01)
+      .sort((a, b) => Math.abs(b.d) - Math.abs(a.d))
+      .slice(0, 2);
+    if (acted.length) {
+      const labels = ['31', '62', '125', '250', '500', '1k', '2k', '4k', '8k', '16k'];
+      const desc = acted.map((x) =>
+        `${labels[x.i]}Hz 相对自身趋势${x.d > 0 ? '高' : '低'} ${Math.abs(x.d).toFixed(1)}dB，` +
+        `反向修正 ${Math.abs(x.v).toFixed(1)}dB`).join('；');
+      lines[1][1] = lines[1][1].replace(/。$/, '') + `；频谱形状校正：${desc}。`;
     }
 
     // 语义：residual 是「谐波外残余能量比」（掩蔽谐波结构后的残余能量占比），
@@ -3321,19 +3402,10 @@
       setTimeout(() => li.classList.add('is-in'), 90 * i + 40);
     });
 
-    // EQ 预置：哼声走陷波，涂抹走中低频削减，两件事分开做。
-    // 哼声最后压：低频抬升会把它盖掉，陷波必须赢。
+    // EQ 预置：直接落上面算好的处方值。preserveEq=true 时不动
+    // （换素材类型只重排文案，手动调过的曲线原样留住）。
     if (!preserveEq) {
-      const eq = new Array(10).fill(0);
-      if (smear != null && smear > 0.25) { eq[3] = -0.45; eq[4] = -0.3; }
-      if (q.lowRatio > 0.2 && hum <= 0.2) { eq[1] = 0.32; eq[2] = 0.18; }
-      if (hum > 0.2) { eq[0] = -0.55; eq[1] = -0.35; }
-      // 频谱重心在 profile.timbre.centroid（quality 里没有 centroid 字段）；
-      // cent > 0 守卫：无有效频谱帧时 centroid 为 0，不能误判成「过暗」去抬 4k/8k
-      const cent = profile.timbre && profile.timbre.centroid;
-      if (cent > 3200) eq[8] = -0.15;
-      if (cent > 0 && cent < 1400) { eq[7] = 0.22; eq[8] = 0.18; }
-      state.eqParams = eq;
+      state.eqParams = preEq;
       state.eqManual = false;
     }
 
@@ -3796,6 +3868,9 @@
     state.profileProcessed = null;
     state.profileArrangement = null;
     state.arrangement = null;
+    // 乐队模型是乐段的派生物，随乐段作废；对话历史留着（与 AI 问答同口径）
+    state.bandModel = null;
+    state.bandTrackLevel = {};
     state.showingAfter = false;
     state.eqParams = null;
     // 高频重建产物是旧素材的派生 PCM，随素材作废；参数回默认
@@ -4027,6 +4102,262 @@
     });
   }
 
+  /* ============================================================
+     乐队编配（AI乐队内核接入）
+     ------------------------------------------------------------
+     与 AI乐队（~/Desktop/音智新媒 完整/AI乐队）同源的 band.js 在这里
+     当 L3 的另一条渲染路：buildScore 出的 1/16 栅格谱直接喂 Band.compose，
+     五轨由乐队内核编排、BandSampler 播真实采样。守卫不满足时（拍号、
+     小节数、旧档案无谱、?engine=1 强制）原路回 E.renderArrangement，
+     行为与接入前逐字节一致。对话指挥只动 bandModel，不碰引擎。
+     ============================================================ */
+  const BAND_METERS = new Set(['2/4', '3/4', '4/4']);   // Band 栅格支持的拍号；6/8 的 BPM 口径与引擎差 2 倍，不接
+  const ARR_TRACKS = [
+    { id: 'lead',  name: '主旋', gain: 0.34, color: '#C66B3D' },
+    { id: 'harm',  name: '和声', gain: 0.19, color: '#B08B6E' },
+    { id: 'bass',  name: '贝斯', gain: 0.26, color: '#606C38' },
+    { id: 'drums', name: '鼓组', gain: 0.22, color: '#C08E3A' },
+    { id: 'pad',   name: '氛围', gain: 0.15, color: '#8B9D83' },
+  ];
+
+  function bandForceEngine() {
+    try { return new URLSearchParams(location.search).get('engine') === '1'; }
+    catch (_) { return false; }
+  }
+
+  /* 守卫全过才返回 compose 入参，否则 null（调用方回退引擎）。 */
+  function bandModelInput(opts) {
+    if (!window.Band || bandForceEngine()) return null;
+    const { meter, bars, profile, muted, rootMidi, modeIndex, bpm, strength } = opts;
+    if (!BAND_METERS.has(meter)) return null;          // 5/4、6/8、7/8 走引擎
+    if (!(bars >= 4)) return null;                     // Band 最小 4 小节，UI 允许 2-3
+    const evts = profile && profile.melody && profile.melody.scoreEvents;
+    if (!evts || !evts.length) return null;            // 旧档案没有记谱数据
+    const id = (profile && profile.identity) || {};
+    let score = null;
+    try {
+      score = E.buildScore(evts, {
+        bpm: id.bpm, meter,
+        sampleRate: profile.meta && profile.meta.sampleRate,
+      });
+    } catch (_) { return null; }
+    const items = ((score && score.items) || [])
+      .filter((it) => it && it.k === 'n' && it.dur > 0);
+    if (items.length < 4) return null;                 // 谱面太空，乐队编不出东西
+    return {
+      melodyItems: items, bpm, meter, bars,
+      rootMidi, modeIndex, muted: muted || {},
+      /* 强度滑杆接线：缺省 0.55 与滑杆初始 55% 一致，旧行为不变 */
+      style: 'pop', seed: 7,
+      intensity: Number.isFinite(strength) ? strength : 0.55,
+    };
+  }
+
+  async function renderBandArrangement(opts) {
+    const input = bandModelInput(opts);
+    if (!input) return null;
+    let model;
+    try {
+      model = Band.compose(input);
+    } catch (err) {
+      console.warn('乐队编配失败，回退引擎：', err);
+      return null;
+    }
+    if (!model || !model.tracks) return null;
+    /* compose 内部把 bpm Math.round 到整数，但产品滑块是 0.1 步进
+       （体检接线 round(bpm×10)/10）。渲染速度必须与滑块、MIDI 导出、
+       回流校验同一个数，否则 92.4 BPM 会被算成 92 的时长再对不上。
+       事件全在整数栅格上，只有换算用 bpm，这里覆写回去是安全的。 */
+    const bpmWanted = Number(opts.bpm);
+    if (Number.isFinite(bpmWanted) && bpmWanted >= 40 && bpmWanted <= 200 &&
+        model.bpm !== bpmWanted) {
+      model = { ...model, bpm: bpmWanted };
+    }
+    const stems = await Band.renderStems(model, { sr: 44100 });
+    const buffer = await Band.mixStems(stems.buffers, { muted: model.muted, seed: model.seed });
+    if (!buffer) return null;
+    const events = Band.modelToEvents(model)
+      .filter((e) => !(model.muted && model.muted[e.track]));
+    if (!events.length) return null;
+    const result = {
+      buffer,
+      events,
+      tracks: ARR_TRACKS.slice(),
+      duration: model.units * Band.unitSecOf(model.bpm),
+      scale: model.scale,
+      meter: model.meter,
+      beatsPerBar: parseInt(model.meter, 10) || 4,
+      engine: 'band',
+    };
+    return { result, model };
+  }
+
+  /* ---------- 对话指挥 UI 同步（aiSyncUI 也会回调这里） ---------- */
+  function syncBandChatUi() {
+    const btn = $('#btnBandChat');
+    const inp = $('#bandChatInput');
+    const st = $('#bandChatState');
+    const a = state.arrangement;
+    const active = !!(a && a.engine === 'band' && state.bandModel);
+    if (btn) btn.disabled = !active || state.bandChatBusy;
+    if (inp) inp.disabled = !active || state.bandChatBusy;
+    if (st && !state.bandChatBusy) {
+      if (!active) {
+        st.textContent = (a && a.engine !== 'band')
+          ? '当前乐段走引擎编配（拍号/小节数不满足乐队内核，或 ?engine=1 强制），指挥不可用。'
+          : '渲染乐段后可用 · 优先走「接口设置」的大模型（千问等），没有 Key 时回落离线规则。';
+      } else if (aiCfg.apiKey) {
+        st.textContent = `已就绪 · ${aiCfg.model} 翻译口语指令，失败自动回落离线规则。`;
+      } else {
+        st.textContent = '已就绪 · 未配置 Key，走离线规则翻译。';
+      }
+    }
+  }
+
+  function bandChatAppend(text, isUser, cls) {
+    const log = $('#bandChatLog');
+    if (!log) return null;
+    const div = document.createElement('div');
+    div.className = 'ai-bubble' + (isUser ? ' is-user' : '') + (cls ? ' ' + cls : '');
+    const body = document.createElement('div');
+    body.className = 'ai-text';
+    body.textContent = text;
+    div.appendChild(body);
+    log.appendChild(div);
+    log.scrollTop = log.scrollHeight;
+    return div;
+  }
+
+  /* 大模型只回 ops 不带话时，把 ops 翻回一句人话（离线路径自带 reply）。 */
+  function bandOpsEcho(ops) {
+    const said = [];
+    for (const o of ops) {
+      if (o.op === 'mute') said.push(`让${BandParse.trackName(o.track)}${o.value ? '先歇会儿' : '回来'}`);
+      else if (o.op === 'instrument') said.push(`把${BandParse.trackName(o.track)}换成${BandParse.instName(o.value)}`);
+      else if (o.op === 'style') said.push(`整体换成${BandParse.styleName(o.value)}的感觉`);
+      else if (o.op === 'intensity') said.push(`强度调到 ${Math.round(o.value * 100)}%`);
+      else if (o.op === 'tempo') said.push(`速度 ${o.value} BPM`);
+      else if (o.op === 'texture') said.push(`把${BandParse.trackName(o.track)}织体换成${BandParse.texName(o.value)}`);
+      else if (o.op === 'density') said.push(`把${BandParse.trackName(o.track)}疏密调到 ${Math.round(o.value * 100)}`);
+      else if (o.op === 'trackLevel') said.push(`把${BandParse.trackName(o.track)}收一点`);
+    }
+    return said.length ? `收到：${said.join('，')}。` : '收到。';
+  }
+
+  /* 模型补丁落完原地重渲：分轨 → 混音 → 换 buffer/events，
+     滑块、走带、五轨面板、琴谱一并对齐到模型现值。 */
+  async function bandRerenderFromModel() {
+    const m = state.bandModel;
+    const a = state.arrangement;
+    if (!m || !a) return;
+    const sr = 44100;
+    const stems = await Band.renderStems(m, { sr });
+    const gains = {};
+    for (const id of Band.TRACK_ORDER) {
+      gains[id] = state.bandTrackLevel[id] != null ? state.bandTrackLevel[id] : 1;
+    }
+    const buffer = await Band.mixStems(stems.buffers, {
+      muted: m.muted, gains, seed: m.seed,
+    });
+    if (!buffer) throw new Error('乐队混音失败');
+    const events = Band.modelToEvents(m)
+      .filter((e) => !(m.muted && m.muted[e.track]));
+    a.buffer = buffer;
+    a.events = events;
+    a.duration = m.units * Band.unitSecOf(m.bpm);
+    a.meter = m.meter;
+    a.beatsPerBar = parseInt(m.meter, 10) || 4;
+    a.engine = 'band';
+    a.renderBpm = m.bpm;
+    a.renderOpts = Object.assign({}, a.renderOpts, {
+      bpm: m.bpm, bars: m.bars, meter: m.meter,
+      rootMidi: m.rootMidi, modeIndex: m.modeIndex,
+      muted: { ...m.muted }, seed: m.seed,
+    });
+    a.stale = false;
+    // 静音态双向同步：mute 指令改的是 model.muted，面板按钮读 state.muted
+    state.muted = { ...m.muted };
+    // 速度滑块跟着真实渲染走（tempo 指令是整数，换风格内部取整也会走到这）
+    const range = $('#bpmRange');
+    if (range) range.value = String(m.bpm);
+    const out = $('#bpmOut');
+    if (out) out.textContent = `${m.bpm} BPM`;
+    renderTracks(events);
+    drawPiano($('#chartPiano'), events);
+    state.profileArrangement = await analyzeAsync(buffer);
+    state.profileArrangement.meta.derived_from = state.profile?.meta?.source_file || null;
+    state.profileArrangement.meta.artifact = 'arrangement';
+    if (m.meter) {
+      state.profileArrangement.identity.meter = m.meter;
+      state.profileArrangement.identity.meterConfidence = 1;
+      state.profileArrangement.identity.meterSource = 'authored';
+      syncMeterBadge(m.meter);
+    }
+    setStatus(`乐队已按指令重排 · ${events.length} 个音符 · ${m.bpm} BPM`, false);
+    await flushSave();
+  }
+
+  async function bandChatSend() {
+    if (state.bandChatBusy) return;
+    const a = state.arrangement;
+    const model = state.bandModel;
+    if (!a || a.engine !== 'band' || !model) {
+      setStatus('先渲染乐段，才能对乐队下指令。', false);
+      return;
+    }
+    if (a.stale) {
+      setStatus('参数已修改，请重新渲染乐段，再指挥。', false);
+      return;
+    }
+    const inp = $('#bandChatInput');
+    const text = ((inp && inp.value) || '').trim();
+    if (!text) return;
+    if (inp) inp.value = '';
+    bandChatAppend(text, true);
+    state.bandChatBusy = true;
+    syncBandChatUi();
+    try {
+      const r = await BandLLM.understand(text, {
+        bpm: model.bpm,
+        intensity: model.intensity,
+        texture: model.texture,
+        density: model.density,
+        muted: model.muted,
+        trackLevel: state.bandTrackLevel,
+        recent: state.bandChatRecent.slice(-6),
+      });
+      if (!r || !r.ops || !r.ops.length) {
+        bandChatAppend((r && r.reply) || '这句我没听懂改什么。试试：鼓再重一点 / 换笛子 / 来个国风 / 慢一点。', false);
+        return;
+      }
+      const prevBpm = model.bpm;
+      const hadTempo = r.ops.some((o) => o.op === 'tempo');
+      const applied = BandParse.applyOps(model, r.ops);
+      let m = applied.model;
+      /* 换风格走 compose，内部会把 bpm 取整；没点名提速就不许悄悄改速度，
+         把补丁前的速度还回去（tempo 指令除外，那是用户明说的整数）。 */
+      if (!hadTempo && Number.isFinite(prevBpm) && m.bpm !== prevBpm) {
+        m = { ...m, bpm: prevBpm };
+      }
+      state.bandModel = m;
+      state.bandTrackLevel = Object.assign({}, state.bandTrackLevel, applied.trackLevel);
+      state.bandChatRecent.push(text);
+      if (state.bandChatRecent.length > 12) state.bandChatRecent.shift();
+      await bandRerenderFromModel();
+      const via = r.via === 'llm'
+        ? `（${(window.BAND_CONFIG && window.BAND_CONFIG.llmModel) || aiCfg.model || '大模型'} 翻译）`
+        : '（离线规则）';
+      bandChatAppend((r.reply || bandOpsEcho(r.ops)) + via, false);
+      addVersionNode('乐队指挥', bandOpsEcho(r.ops));
+    } catch (err) {
+      console.error(err);
+      bandChatAppend('指挥失败：' + ((err && err.message) || err), false, 'is-error');
+    } finally {
+      state.bandChatBusy = false;
+      syncBandChatUi();
+    }
+  }
+
   // cache：恢复工作区时带上存盘的 L3 分析。渲染用 seed = 7，同一组参数必然出同一段谱，
   // 只有 analyze 这 ~0.2s 是白花的；stale 标记由调用方在恢复结束时另行回填。
   async function renderArrangement(cache) {
@@ -4050,7 +4381,16 @@
       // 拍号跟原曲走：分析出 5/4 却按 4/4 再生，产品会自相矛盾
       const meter = state.profile?.identity?.meter || '4/4';
 
-      const res = await E.renderArrangement({ rootMidi, modeIndex, bpm, bars, muted, meter });
+      // 乐队优先，守卫不过回引擎；?engine=1 可强制 A/B 对比
+      // strength 是强度滑杆（0到1）：乐队编配拿它当整体力度，与精修同源一个滑杆
+      const strengthRaw = Number($('#strength').value) / 100;
+      const bandOut = await renderBandArrangement({
+        rootMidi, modeIndex, bpm, bars, muted, meter, profile: state.profile,
+        strength: Number.isFinite(strengthRaw) ? Math.min(1, Math.max(0, strengthRaw)) : 0.55,
+      });
+      const res = bandOut
+        ? bandOut.result
+        : await E.renderArrangement({ rootMidi, modeIndex, bpm, bars, muted, meter });
       if (g !== state.loadGen) {
         // 渲染期间换了素材：丢弃旧调性结果，按钮文案复位（新流水线随后会自行重建 UI）
         btn.textContent = '渲染乐段';
@@ -4060,6 +4400,9 @@
       res.renderOpts = { rootMidi, modeIndex, bpm, bars, muted, seed: 7, meter };
       res.renderBpm = bpm;
       res.stale = false;
+      res.engine = bandOut ? 'band' : 'engine';
+      state.bandModel = bandOut ? bandOut.model : null;
+      state.bandTrackLevel = {};
       state.arrangement = res;
       renderTracks(res.events);
       drawPiano($('#chartPiano'), res.events);
@@ -4081,7 +4424,14 @@
         `${bpm} BPM · ${bars} 小节 · ${res.events.length} 个音符`);
 
       btn.textContent = '重新渲染';
-      setStatus(`已生成 ${res.events.length} 个音符，可导出 MIDI 与分轨`, false);
+      // 采样音源状态如实报：renderStems 已等过 whenReady，此刻只会是 ready/failed
+      let bandNote = '';
+      if (res.engine === 'band') {
+        const samReady = typeof BandSampler !== 'undefined' && BandSampler.ready && BandSampler.ready();
+        bandNote = samReady ? ' · 乐队编配（真实采样音源）' : ' · 乐队编配（采样未就绪，合成回退）';
+      }
+      setStatus(`已生成 ${res.events.length} 个音符，可导出 MIDI 与分轨${bandNote}`, false);
+      syncBandChatUi();
       await flushSave();
     } catch (err) {
       console.error(err);
@@ -4800,6 +5150,8 @@
     $('#btnProcess').addEventListener('click', () => processAudio());
     $('#strength').addEventListener('input', (e) => {
       $('#strengthTag').textContent = '强度 ' + e.target.value + '%';
+      // 强度现在也进乐队编配：乐段随滑杆过期，不标的话播放的是旧力度
+      markArrangementStale();
     });
     bweWireUi();   // 高频重建前置级：开关 / 运行 / 取消 / 强度
 
@@ -4962,16 +5314,29 @@
       try {
         const ids = a.tracks.map((t) => t.id); // lead/harm/bass/drums/pad
         const base = a.renderOpts;
+        // 乐队路：分轨与混音同一份 bandModel（对话补丁后的现值），不再走引擎重渲
+        const bandModel = a.engine === 'band' ? state.bandModel : null;
+        if (a.engine === 'band' && !bandModel) {
+          setStatus('乐队模型缺失，请重新渲染乐段，再导出分轨。', false);
+          return;
+        }
+        const muteRef = bandModel ? bandModel.muted : (base && base.muted);
         const files = [];
         const kept = [];
         for (const id of ids) {
           // 混音里被用户静音的轨不含在编曲中，跳过以保持分轨与混音一致
-          if (base && base.muted && base.muted[id]) continue;
-          const muted = {};
-          ids.forEach((x) => { if (x !== id) muted[x] = true; });
-          const stem = await E.renderArrangement({ ...(base || {}), muted });
-          const wav = await E.bufferToWav(stem.buffer, 24).arrayBuffer();
-          files.push({ name: `arrangement_${id}.wav`, data: new Uint8Array(wav) });
+          if (muteRef && muteRef[id]) continue;
+          let wavBuf;
+          if (bandModel) {
+            const stem = await Band.renderStems(bandModel, { sr: 44100, only: id });
+            wavBuf = await E.bufferToWav(stem.buffers[id], 24).arrayBuffer();
+          } else {
+            const muted = {};
+            ids.forEach((x) => { if (x !== id) muted[x] = true; });
+            const stem = await E.renderArrangement({ ...(base || {}), muted });
+            wavBuf = await E.bufferToWav(stem.buffer, 24).arrayBuffer();
+          }
+          files.push({ name: `arrangement_${id}.wav`, data: new Uint8Array(wavBuf) });
           kept.push(id);
         }
         if (!files.length) {
@@ -5192,6 +5557,16 @@
       });
     }
     aiSyncUI();
+
+    // 乐队对话指挥（元素恒在 HTML 里，内核没加载时按钮保持禁用）
+    if ($('#btnBandChat')) {
+      $('#btnBandChat').addEventListener('click', () => bandChatSend());
+    }
+    if ($('#bandChatInput')) {
+      $('#bandChatInput').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); bandChatSend(); }
+      });
+    }
 
     // 回流
     $('#btnRecheck').addEventListener('click', runRecheck);
