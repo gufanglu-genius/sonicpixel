@@ -9,7 +9,7 @@
    用法：先起 8080 服务，再 node tests/product/verify-bwe.js */
 const { chromium } = require('/Users/chenhuidediannao/.stepfun/node_modules/playwright-core');
 const EXEC = '/Users/chenhuidediannao/Library/Caches/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-mac-arm64/chrome-headless-shell';
-const ASSETS = '/Users/chenhuidediannao/Desktop/音智新媒-高频重建/web/assets';
+const ASSETS = '/Users/chenhuidediannao/Desktop/音智新媒 完整/音智新媒-高频重建/web/assets';
 
 (async () => {
   const b = await chromium.launch({ executablePath: EXEC, args: ['--no-sandbox'] });

@@ -4419,6 +4419,25 @@
         state.profileArrangement.identity.meterSource = 'authored';
         syncMeterBadge(res.meter);
       }
+      // 调式同理按创作真值回填：乐队编配全频色度会被鼓组与采样泛音带偏
+      // （实测 A羽 被判成 A商），独立重检在这里不可靠，与 meterSource 同一口径。
+      {
+        const mm = E.MODES[modeIndex];
+        const idA = state.profileArrangement && state.profileArrangement.identity;
+        if (mm && idA) {
+          const penta = [0, 2, 4, 7, 9]; // 与 engine.js PENTA_STEPS 一致
+          const rootIdx = ((rootMidi % 12) + 12) % 12;
+          const deg = penta[mm.degIndex];
+          idA.mode = mm.id;
+          idA.modeGlyph = mm.glyph;
+          idA.modeName = mm.name;
+          idA.modeConfidence = 1;
+          idA.modeSource = 'authored';
+          idA.key = E.PC_NAMES[rootIdx];
+          idA.gongIndex = (rootIdx - deg + 12) % 12;
+          idA.gongRoot = E.PC_NAMES[idA.gongIndex];
+        }
+      }
 
       addVersionNode(E.MODES[modeIndex].name + ' 再生',
         `${bpm} BPM · ${bars} 小节 · ${res.events.length} 个音符`);
